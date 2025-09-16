@@ -584,6 +584,36 @@ def _lookup_core(address: str, *, include_votes: bool = False, refresh_votes: bo
 # =========================
 # ROUTES
 # =========================
+@app.get("/debug/district")
+def debug_district():
+    label = (request.args.get("label") or "").strip()
+    data, err = fetch_people_by_district(label)
+    return {
+        "label": label,
+        "count": len(data or []),
+        "names": [(r.get("person") or {}).get("name") for r in (data or [])],
+        "error": err,
+    }, 200
+
+@app.get("/debug/trace")
+def debug_trace():
+    addr = (request.args.get("address") or "").strip()
+    geo, err = geocode_address(addr)
+    if err: return {"error": err}, 400
+    sldl_clean = sldl_to_openstates((geo.get("sldl") or {}).get("name") or "")
+    base_row = FLOTERIAL_MAP_BASE.get(sldl_clean, [])
+    town = geo.get("town")
+    return {
+        "input": addr,
+        "sldl_clean": sldl_clean,
+        "town": town,
+        "base_overlays": base_row,          # what we *intend* to union
+        "town_overlays": FLOTERIAL_MAP_TOWN.get(town or "", []),
+    }, 200
+
+
+
+
 @app.get("/debug/nh-house-ids.csv")
 def nh_house_ids_csv():
     counties = ["Belknap","Carroll","Cheshire","Coos","Grafton","Hillsborough",
@@ -740,3 +770,4 @@ def root():
 if __name__ == "__main__":
     print(f"OPENSTATES_API_KEY loaded: {bool(OPENSTATES_API_KEY)}")
     app.run(host="127.0.0.1", port=int(os.getenv("PORT", "5000")), debug=True)
+
