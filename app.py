@@ -33,12 +33,12 @@ PROBE_MAX_RINGS = int(os.getenv("PROBE_MAX_RINGS", "2"))
 VOTES_GSHEET_DOC_ID = os.getenv("VOTES_GSHEET_DOC_ID", "")
 VOTES_GSHEET_GID   = os.getenv("VOTES_GSHEET_GID", "")
 VOTES_SHEET_NAME   = os.getenv("VOTES_SHEET_NAME", "House Key Votes")
-# PATCH: sanitize env (strip whitespace & quotes)
+# sanitize env (strip whitespace & quotes)
 VOTES_CSV_URL      = (os.getenv("VOTES_CSV_URL", "") or "").strip().strip("'\"")
 VOTES_TTL          = int(os.getenv("VOTES_TTL_SECONDS", "900"))  # seconds
 
 # Floterial CSV mapping
-FLOTERIAL_MAP_PATH = os.getenv("FLOTERIAL_MAP_PATH", "floterial_by_town.csv")  # Town -> [District,...]
+FLOTERIAL_MAP_PATH = os.getenv("FLOTERIAL_MAP_PATH", "floterial_by_town.csv")          # Town -> [District,...]
 FLOTERIAL_BY_BASE_PATH = os.getenv("FLOTERIAL_BY_BASE_PATH", "floterial_by_base.csv")  # BaseLabel -> [District,...]
 
 # Caches
@@ -159,6 +159,14 @@ def fetch_people_by_district(district: str) -> Tuple[List[dict], Optional[str]]:
         return [], err
     return (data or {}).get("results") or [], None
 
+# Retry helper for floterials (handles 429 once)
+def _fetch_district_retry(label: str, retries: int = 1, delay: float = 6.0) -> List[dict]:
+    data, err = fetch_people_by_district(label)
+    if err and "rate limited" in err.lower() and retries > 0:
+        time.sleep(delay)
+        data, err = fetch_people_by_district(label)
+    return data or []
+
 def _ingest(collected: Dict[str, dict], results: List[dict]) -> None:
     for rec in results or []:
         p = rec.get("person") or rec
@@ -266,7 +274,7 @@ def normalize_person(person: Dict[str, Any]) -> Dict[str, Any]:
 # VOTES: GOOGLE SHEETS / CSV
 # =========================
 def _votes_csv_url() -> Optional[str]:
-    # PATCH: prefer env, else fallback to local file next to app.py
+    # prefer env, else fallback to local file next to app.py
     if VOTES_CSV_URL:
         return VOTES_CSV_URL
     local = os.path.join(os.path.dirname(__file__), "house_key_votes.csv").replace("\\", "/")
@@ -288,10 +296,10 @@ def _alt_csv_urls(primary: str) -> List[str]:
     return [u for u in alts if u and u != primary]
 
 def _http_get_text(url: str) -> Tuple[Optional[str], Optional[str]]:
-    # PATCH: Local file support (accept file:// or file:///), keep leading '/' on Linux
+    # Local file support (accept file:// or file:///), keep leading '/' on Linux
     if url.lower().startswith("file://"):
         try:
-            p = url[7:]  # drop 'file://', keep the rest
+            p = url[7:]  # drop 'file://', keep rest
             p = p.strip().strip("'\"")
             if os.name != "nt" and not p.startswith("/"):
                 p = "/" + p
@@ -520,16 +528,14 @@ def _lookup_core(address: str, *, include_votes: bool = False, refresh_votes: bo
     base_label = sldl_clean.strip()
     if base_label and base_label in FLOTERIAL_MAP_BASE:
         for flab in FLOTERIAL_MAP_BASE[base_label]:
-            extra, _ = fetch_people_by_district(flab)
-            _ingest(raw_people, extra)
+            _ingest(raw_people, _fetch_district_retry(flab))
 
     # ---- FALLBACK: town→floterial (if still only 1) ----
     uniq_labels = {(v.get("district") or "").strip() for v in raw_people.values() if v.get("district")}
     town = geo.get("town")
     if town in FLOTERIAL_MAP_TOWN and len(uniq_labels) < 2:
         for flab in FLOTERIAL_MAP_TOWN[town]:
-            extra, _ = fetch_people_by_district(flab)
-            _ingest(raw_people, extra)
+            _ingest(raw_people, _fetch_district_retry(flab))
 
     # re-filter to NH lower
     raw_people = {
