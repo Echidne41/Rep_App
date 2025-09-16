@@ -43,7 +43,7 @@ FLOTERIAL_BY_BASE_PATH = os.getenv("FLOTERIAL_BY_BASE_PATH", "floterial_by_base.
 
 # Geocoder fallback
 NOMINATIM_FALLBACK = (os.getenv("NOMINATIM_FALLBACK", "1") or "1").strip().lower() in ("1","true","yes")
-NOMINATIM_EMAIL    = os.getenv("NOMINATIM_EMAIL","")
+NOMINATIM_EMAIL    = os.getenv("NOMINATIM_EMAIL","")  # TODO: your email (optional)
 
 # Caches
 PROBE_CACHE: Dict[str, Any] = {}
@@ -190,12 +190,17 @@ def fetch_people_by_district(district: str) -> Tuple[List[dict], Optional[str]]:
         return [], err
     return (data or {}).get("results") or [], None
 
-def _fetch_district_retry(label: str, retries: int = 1, delay: float = 6.0) -> List[dict]:
-    data, err = fetch_people_by_district(label)
-    if err and "rate limited" in err.lower() and retries > 0:
-        time.sleep(delay)
+# Retry helper for floterials (handles intermittent failures)
+def _fetch_district_retry(label: str, retries: int = 3, delay: float = 4.0) -> List[dict]:
+    for i in range(retries + 1):
         data, err = fetch_people_by_district(label)
-    return data or []
+        if not err and data:
+            return data
+        if i == retries:
+            print(f"[overlay] {label}: failed after {retries} retries — {err or 'empty'}")
+            return []
+        time.sleep(delay + 2 * i)
+    return []
 
 def _ingest(collected: Dict[str, dict], results: List[dict]) -> None:
     for rec in results or []:
@@ -687,6 +692,30 @@ def debug_floterials():
         "by_base_count": sum(len(v) for v in FLOTERIAL_MAP_BASE.values()),
         "sample_by_base": {k: v for k, v in list(FLOTERIAL_MAP_BASE.items())[:3]},
     }, 200
+
+@app.get("/debug/trace")
+def debug_trace():
+    addr = (request.args.get("address") or "").strip()
+    geo, err = geocode_address(addr)
+    if err: return {"error": err}, 400
+    sldl_clean = sldl_to_openstates((geo.get("sldl") or {}).get("name") or "")
+    return {
+        "input": addr,
+        "sldl_clean": sldl_clean,
+        "town": geo.get("town"),
+        "base_overlays": FLOTERIAL_MAP_BASE.get(sldl_clean, []),
+        "town_overlays": FLOTERIAL_MAP_TOWN.get(geo.get("town") or "", []),
+    }, 200
+
+@app.get("/debug/district")
+def debug_district():
+    label = (request.args.get("label") or "").strip()
+    data, err = fetch_people_by_district(label)
+    names = []
+    for r in (data or []):
+        p = (r.get("person") if isinstance(r, dict) else None) or r
+        names.append(p.get("name"))
+    return {"label": label, "count": len(data or []), "names": names, "error": err}, 200
 
 # Votes audit: shows why certain reps didn't match the CSV
 @app.get("/debug/votes-audit")
