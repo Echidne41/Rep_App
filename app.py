@@ -18,6 +18,7 @@ except Exception:
     pass
 
 OPENSTATES_API_KEY = os.getenv("OPENSTATES_API_KEY", "")
+
 OS_ROOT = "https://v3.openstates.org"
 OS_PEOPLE = f"{OS_ROOT}/people"
 OS_PEOPLE_GEO = f"{OS_ROOT}/people.geo"
@@ -32,7 +33,8 @@ PROBE_MAX_RINGS = int(os.getenv("PROBE_MAX_RINGS", "2"))
 VOTES_GSHEET_DOC_ID = os.getenv("VOTES_GSHEET_DOC_ID", "")
 VOTES_GSHEET_GID   = os.getenv("VOTES_GSHEET_GID", "")
 VOTES_SHEET_NAME   = os.getenv("VOTES_SHEET_NAME", "House Key Votes")
-VOTES_CSV_URL      = os.getenv("VOTES_CSV_URL", "")   # preferred when set
+# PATCH: sanitize env (strip whitespace & quotes)
+VOTES_CSV_URL      = (os.getenv("VOTES_CSV_URL", "") or "").strip().strip("'\"")
 VOTES_TTL          = int(os.getenv("VOTES_TTL_SECONDS", "900"))  # seconds
 
 # Floterial CSV mapping
@@ -63,10 +65,8 @@ app = Flask(__name__, static_url_path="", static_folder=".")
 
 ALLOWED = (os.getenv("ALLOWED_ORIGINS", "*") or "").strip()
 if not ALLOWED or ALLOWED == "*":
-    # staging-safe: open CORS
-    CORS(app, resources={r"/*": {"origins": "*"}})
+    CORS(app, resources={r"/*": {"origins": "*"}})  # staging-safe default
 else:
-    # comma-separated allowlist
     CORS(app, resources={r"/*": {"origins": [o.strip() for o in ALLOWED.split(",") if o.strip()]}})
 
 # =========================
@@ -266,14 +266,11 @@ def normalize_person(person: Dict[str, Any]) -> Dict[str, Any]:
 # VOTES: GOOGLE SHEETS / CSV
 # =========================
 def _votes_csv_url() -> Optional[str]:
+    # PATCH: prefer env, else fallback to local file next to app.py
     if VOTES_CSV_URL:
         return VOTES_CSV_URL
-    if VOTES_GSHEET_DOC_ID and VOTES_GSHEET_GID:
-        return f"https://docs.google.com/spreadsheets/d/{VOTES_GSHEET_DOC_ID}/export?format=csv&gid={VOTES_GSHEET_GID}"
-    if VOTES_GSHEET_DOC_ID and VOTES_SHEET_NAME:
-        sheet = urllib.parse.quote(VOTES_SHEET_NAME)
-        return f"https://docs.google.com/spreadsheets/d/{VOTES_GSHEET_DOC_ID}/gviz/tq?tqx=out:csv&sheet={sheet}"
-    return None
+    local = os.path.join(os.path.dirname(__file__), "house_key_votes.csv").replace("\\", "/")
+    return f"file://{local}"
 
 def _alt_csv_urls(primary: str) -> List[str]:
     alts: List[str] = []
@@ -291,15 +288,22 @@ def _alt_csv_urls(primary: str) -> List[str]:
     return [u for u in alts if u and u != primary]
 
 def _http_get_text(url: str) -> Tuple[Optional[str], Optional[str]]:
-    if url.lower().startswith("file:///"):
+    # PATCH: Local file support (accept file:// or file:///), keep leading '/' on Linux
+    if url.lower().startswith("file://"):
         try:
-            p = url[8:]
+            p = url[7:]  # drop 'file://', keep the rest
+            p = p.strip().strip("'\"")
+            if os.name != "nt" and not p.startswith("/"):
+                p = "/" + p
             if os.name == "nt":
+                if p.startswith("/"):
+                    p = p[1:]
                 p = p.replace("/", "\\")
             with open(p, "r", encoding="utf-8") as f:
                 return f.read(), None
         except Exception as e:
             return None, f"file error: {e}"
+
     try:
         headers = {
             "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -429,6 +433,7 @@ def _row_to_vote_list(row: dict) -> List[dict]:
 # =========================
 def _load_town_map(path: str) -> Dict[str, List[str]]:
     out: Dict[str, List[str]] = {}
+    # seed built-ins
     for t, d in NH_FLOTERIAL_BY_TOWN_BUILTIN.items():
         out.setdefault(t, []).append(d)
     if not path or not os.path.exists(path):
