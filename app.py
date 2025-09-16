@@ -41,6 +41,10 @@ VOTES_TTL          = int(os.getenv("VOTES_TTL_SECONDS", "900"))  # seconds
 FLOTERIAL_MAP_PATH = os.getenv("FLOTERIAL_MAP_PATH", "floterial_by_town.csv")          # Town -> [District,...]
 FLOTERIAL_BY_BASE_PATH = os.getenv("FLOTERIAL_BY_BASE_PATH", "floterial_by_base.csv")  # BaseLabel -> [District,...]
 
+# Geocoder fallback
+NOMINATIM_FALLBACK = (os.getenv("NOMINATIM_FALLBACK", "1") or "1").strip().lower() in ("1","true","yes")
+NOMINATIM_EMAIL    = os.getenv("NOMINATIM_EMAIL","")
+
 # Caches
 PROBE_CACHE: Dict[str, Any] = {}
 VOTES_CACHE: Dict[str, Any] = {"at": 0, "rows": [], "src": ""}
@@ -88,6 +92,30 @@ def parse_town_from_matched(addr: str) -> Optional[str]:
     parts = [p.strip() for p in addr.split(",")]
     return parts[1].title() if len(parts) >= 2 else None
 
+def geocode_nominatim(address: str) -> Optional[Dict[str, Any]]:
+    try:
+        ua = f"nh-rep-finder/1 ({NOMINATIM_EMAIL})" if NOMINATIM_EMAIL else "nh-rep-finder/1"
+        r = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"format":"jsonv2","q":address,"addressdetails":1,"limit":1},
+            headers={"User-Agent": ua}, timeout=15
+        )
+        r.raise_for_status()
+        arr = r.json() or []
+        if not arr: return None
+        rec = arr[0]
+        a = rec.get("address") or {}
+        town = a.get("town") or a.get("village") or a.get("city") or a.get("hamlet") or a.get("municipality")
+        return {
+            "formattedAddress": rec.get("display_name"),
+            "lat": float(rec.get("lat")),
+            "lon": float(rec.get("lon")),
+            "town": (town or "").title(),
+            "sldl": {"name": None, "geoid": None},
+        }
+    except Exception:
+        return None
+
 def geocode_address(address: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     params = {"address": address, "benchmark": "Public_AR_Current", "vintage": "Current_Current", "format": "json"}
     try:
@@ -95,27 +123,30 @@ def geocode_address(address: str) -> Tuple[Optional[Dict[str, Any]], Optional[st
         r.raise_for_status()
         data = r.json()
         matches = data.get("result", {}).get("addressMatches", [])
-        if not matches:
-            return None, "Address not found by Census Geocoder."
-        m = matches[0]
-        coords = m.get("coordinates", {})
-        geos = m.get("geographies", {})
-
-        sldl_name = sldl_geoid = None
-        for key, arr in geos.items():
-            if isinstance(arr, list) and "State Legislative Districts - Lower" in key and arr:
-                rec = arr[0]
-                sldl_name = rec.get("NAME")
-                sldl_geoid = rec.get("GEOID")
-
-        return {
-            "formattedAddress": m.get("matchedAddress"),
-            "lat": coords.get("y"),
-            "lon": coords.get("x"),
-            "town": parse_town_from_matched(m.get("matchedAddress") or ""),
-            "sldl": {"name": sldl_name, "geoid": sldl_geoid},
-        }, None
+        if matches:
+            m = matches[0]
+            coords = m.get("coordinates", {})
+            geos = m.get("geographies", {})
+            sldl_name = sldl_geoid = None
+            for key, arr in geos.items():
+                if isinstance(arr, list) and "State Legislative Districts - Lower" in key and arr:
+                    rec = arr[0]; sldl_name = rec.get("NAME"); sldl_geoid = rec.get("GEOID")
+            out = {
+                "formattedAddress": m.get("matchedAddress"),
+                "lat": coords.get("y"),
+                "lon": coords.get("x"),
+                "town": parse_town_from_matched(m.get("matchedAddress") or ""),
+                "sldl": {"name": sldl_name, "geoid": sldl_geoid},
+            }
+            return out, None
+        if NOMINATIM_FALLBACK:
+            alt = geocode_nominatim(address)
+            if alt: return alt, None
+        return None, "Address not found by geocoders."
     except requests.RequestException as e:
+        if NOMINATIM_FALLBACK:
+            alt = geocode_nominatim(address)
+            if alt: return alt, None
         return None, f"Census Geocoder error: {e}"
 
 # =========================
@@ -159,7 +190,6 @@ def fetch_people_by_district(district: str) -> Tuple[List[dict], Optional[str]]:
         return [], err
     return (data or {}).get("results") or [], None
 
-# Retry helper for floterials (handles 429 once)
 def _fetch_district_retry(label: str, retries: int = 1, delay: float = 6.0) -> List[dict]:
     data, err = fetch_people_by_district(label)
     if err and "rate limited" in err.lower() and retries > 0:
@@ -441,7 +471,6 @@ def _row_to_vote_list(row: dict) -> List[dict]:
 # =========================
 def _load_town_map(path: str) -> Dict[str, List[str]]:
     out: Dict[str, List[str]] = {}
-    # seed built-ins
     for t, d in NH_FLOTERIAL_BY_TOWN_BUILTIN.items():
         out.setdefault(t, []).append(d)
     if not path or not os.path.exists(path):
@@ -584,36 +613,6 @@ def _lookup_core(address: str, *, include_votes: bool = False, refresh_votes: bo
 # =========================
 # ROUTES
 # =========================
-@app.get("/debug/district")
-def debug_district():
-    label = (request.args.get("label") or "").strip()
-    data, err = fetch_people_by_district(label)
-    return {
-        "label": label,
-        "count": len(data or []),
-        "names": [(r.get("person") or {}).get("name") for r in (data or [])],
-        "error": err,
-    }, 200
-
-@app.get("/debug/trace")
-def debug_trace():
-    addr = (request.args.get("address") or "").strip()
-    geo, err = geocode_address(addr)
-    if err: return {"error": err}, 400
-    sldl_clean = sldl_to_openstates((geo.get("sldl") or {}).get("name") or "")
-    base_row = FLOTERIAL_MAP_BASE.get(sldl_clean, [])
-    town = geo.get("town")
-    return {
-        "input": addr,
-        "sldl_clean": sldl_clean,
-        "town": town,
-        "base_overlays": base_row,          # what we *intend* to union
-        "town_overlays": FLOTERIAL_MAP_TOWN.get(town or "", []),
-    }, 200
-
-
-
-
 @app.get("/debug/nh-house-ids.csv")
 def nh_house_ids_csv():
     counties = ["Belknap","Carroll","Cheshire","Coos","Grafton","Hillsborough",
@@ -688,6 +687,45 @@ def debug_floterials():
         "by_base_count": sum(len(v) for v in FLOTERIAL_MAP_BASE.values()),
         "sample_by_base": {k: v for k, v in list(FLOTERIAL_MAP_BASE.items())[:3]},
     }, 200
+
+# Votes audit: shows why certain reps didn't match the CSV
+@app.get("/debug/votes-audit")
+def debug_votes_audit():
+    addr = (request.args.get("address") or "").strip()
+    if not addr:
+        return {"error": "address required"}, 400
+    core = _lookup_core(addr, include_votes=False)
+    resp = core[0] if isinstance(core, tuple) else core
+    data = resp.get_json().get("data", {})
+    reps = data.get("stateRepresentatives") or []
+
+    rows, err = _fetch_votes_rows(force_refresh=True)
+    if err:
+        return {"error": err}, 400
+
+    id_cols = {"openstates_person_id","openstates id","openstates_id","person_id","os id"}
+    def csv_has_id(pid: str) -> bool:
+        for r in rows:
+            for k, v in (r or {}).items():
+                if (k or "").strip().lower() in id_cols and (v or "").strip() == pid:
+                    return True
+        return False
+
+    report = []
+    for r in reps:
+        pid = (r.get("id") or "").strip()
+        nm  = (r.get("name") or "").strip()
+        dist= (r.get("district") or "").strip()
+        row = _match_row_for_rep(rows, person_id=pid, name=nm, district=dist)
+        if row:
+            report.append({"id":pid,"name":nm,"district":dist,"matched":True,"votes":len(_row_to_vote_list(row))})
+        else:
+            why = "unknown"
+            if not pid:                why = "rep has no OpenStates id"
+            elif not csv_has_id(pid):  why = "id not found in CSV"
+            else:                      why = "name+district mismatch"
+            report.append({"id":pid,"name":nm,"district":dist,"matched":False,"why":why})
+    return {"address":addr, "using": VOTES_CACHE.get("src",""), "result":report}, 200
 
 @app.get("/api/key-votes")
 def api_key_votes():
@@ -770,4 +808,3 @@ def root():
 if __name__ == "__main__":
     print(f"OPENSTATES_API_KEY loaded: {bool(OPENSTATES_API_KEY)}")
     app.run(host="127.0.0.1", port=int(os.getenv("PORT", "5000")), debug=True)
-
