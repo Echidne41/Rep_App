@@ -18,8 +18,6 @@ except Exception:
     pass
 
 OPENSTATES_API_KEY = os.getenv("OPENSTATES_API_KEY", "")
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*")
-
 OS_ROOT = "https://v3.openstates.org"
 OS_PEOPLE = f"{OS_ROOT}/people"
 OS_PEOPLE_GEO = f"{OS_ROOT}/people.geo"
@@ -62,20 +60,14 @@ NH_FLOTERIAL_BY_TOWN_BUILTIN = {
 # APP & CORS
 # =========================
 app = Flask(__name__, static_url_path="", static_folder=".")
-if ALLOWED_ORIGINS and ALLOWED_ORIGINS != "*":
-    origins = [o.strip() for o in ALLOWED_ORIGINS.split(",") if o.strip()]
-    from flask_cors import CORS  # <-- at top of file
 
-# ... after app = Flask(__name__)
-import os
-ALLOWED = os.getenv("ALLOWED_ORIGINS", "*")
-
-if not ALLOWED.strip() or ALLOWED == "*":
-    # staging-safe: allow everything
+ALLOWED = (os.getenv("ALLOWED_ORIGINS", "*") or "").strip()
+if not ALLOWED or ALLOWED == "*":
+    # staging-safe: open CORS
     CORS(app, resources={r"/*": {"origins": "*"}})
 else:
-    # strict list: comma-separated origins
-    CORS(app, resources={r"/*": {"origins": [o.strip() for o in ALLOWED.split(",")]}})
+    # comma-separated allowlist
+    CORS(app, resources={r"/*": {"origins": [o.strip() for o in ALLOWED.split(",") if o.strip()]}})
 
 # =========================
 # HELPERS: GEOCODING / LABELS
@@ -130,11 +122,7 @@ def geocode_address(address: str) -> Tuple[Optional[Dict[str, Any]], Optional[st
 # OPENSTATES v3
 # =========================
 def _headers() -> Dict[str, str]:
-    return {
-        "X-API-KEY": OPENSTATES_API_KEY,
-        "Accept": "application/json",
-        "User-Agent": "nh-legislator-lookup/2.2",
-    }
+    return {"X-API-KEY": OPENSTATES_API_KEY, "Accept": "application/json", "User-Agent": "nh-legislator-lookup/2.2"}
 
 def _get(url: str, params: dict) -> Tuple[Optional[dict], Optional[str]]:
     try:
@@ -275,7 +263,7 @@ def normalize_person(person: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 # =========================
-# VOTES: GOOGLE SHEETS
+# VOTES: GOOGLE SHEETS / CSV
 # =========================
 def _votes_csv_url() -> Optional[str]:
     if VOTES_CSV_URL:
@@ -303,18 +291,15 @@ def _alt_csv_urls(primary: str) -> List[str]:
     return [u for u in alts if u and u != primary]
 
 def _http_get_text(url: str) -> Tuple[Optional[str], Optional[str]]:
-    # allow local file:///C:/... fallback (Windows & macOS)
     if url.lower().startswith("file:///"):
         try:
-            p = url[8:]  # strip "file:///"
+            p = url[8:]
             if os.name == "nt":
-                # keep drive letter (e.g., C:/...), normalize slashes
                 p = p.replace("/", "\\")
             with open(p, "r", encoding="utf-8") as f:
                 return f.read(), None
         except Exception as e:
             return None, f"file error: {e}"
-
     try:
         headers = {
             "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -333,7 +318,6 @@ def _http_get_text(url: str) -> Tuple[Optional[str], Optional[str]]:
     except Exception as e:
         return None, str(e)
 
-
 def _fetch_votes_rows(force_refresh: bool = False):
     now = time.time()
     if not force_refresh and VOTES_CACHE["rows"] and now - VOTES_CACHE["at"] < VOTES_TTL:
@@ -348,12 +332,10 @@ def _fetch_votes_rows(force_refresh: bool = False):
     for url in tried:
         text, err = _http_get_text(url)
         if err:
-            last_err = f"Votes CSV fetch error: {err}"
-            continue
+            last_err = f"Votes CSV fetch error: {err}"; continue
         t = (text or "").lstrip()
         if t.lower().startswith("<!doctype html") or "<html" in t[:1000].lower():
-            last_err = "Votes CSV URL returned HTML (fix sharing or use published CSV)."
-            continue
+            last_err = "Votes CSV URL returned HTML (fix sharing or use published CSV)."; continue
         try:
             csv.field_size_limit(min(sys.maxsize, 10_000_000))
             buf = io.StringIO(text)
@@ -363,7 +345,6 @@ def _fetch_votes_rows(force_refresh: bool = False):
             return rows, None
         except Exception as e:
             last_err = f"Votes CSV parse error: {e}"
-
     return [], (last_err or "Failed to fetch votes CSV")
 
 def _norm(s: Optional[str]) -> str:
@@ -448,7 +429,6 @@ def _row_to_vote_list(row: dict) -> List[dict]:
 # =========================
 def _load_town_map(path: str) -> Dict[str, List[str]]:
     out: Dict[str, List[str]] = {}
-    # seed built-ins
     for t, d in NH_FLOTERIAL_BY_TOWN_BUILTIN.items():
         out.setdefault(t, []).append(d)
     if not path or not os.path.exists(path):
@@ -593,17 +573,14 @@ def _lookup_core(address: str, *, include_votes: bool = False, refresh_votes: bo
 # =========================
 # ROUTES
 # =========================
-
 @app.get("/debug/nh-house-ids.csv")
 def nh_house_ids_csv():
-    # Pull every current NH House member by iterating district labels
     counties = ["Belknap","Carroll","Cheshire","Coos","Grafton","Hillsborough",
                 "Merrimack","Rockingham","Strafford","Sullivan"]
     seen = set()
     rows = []
 
     def grab(label: str):
-        # retry once on 429
         data, err = _get(OS_PEOPLE, {
             "jurisdiction": "New Hampshire",
             "org_classification": "lower",
@@ -634,11 +611,10 @@ def nh_house_ids_csv():
             rows.append([pid, p.get("name"), district, party or ""])
             seen.add(pid)
 
-    # districts are "County N"; N upper-bounded generously
     for c in counties:
         for n in range(1, 80):
             grab(f"{c} {n}")
-            time.sleep(0.6)  # be polite
+            time.sleep(0.6)
 
     buf = io.StringIO()
     w = csv.writer(buf)
@@ -646,10 +622,6 @@ def nh_house_ids_csv():
     for r in sorted(rows, key=lambda r: (str(r[2]), str(r[1]))):
         w.writerow(r)
     return buf.getvalue(), 200, {"Content-Type": "text/csv"}
-
-
-
-
 
 @app.get("/house_key_votes.csv")
 def serve_local_votes():
@@ -757,4 +729,3 @@ def root():
 if __name__ == "__main__":
     print(f"OPENSTATES_API_KEY loaded: {bool(OPENSTATES_API_KEY)}")
     app.run(host="127.0.0.1", port=int(os.getenv("PORT", "5000")), debug=True)
-
