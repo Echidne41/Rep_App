@@ -64,9 +64,18 @@ NH_FLOTERIAL_BY_TOWN_BUILTIN = {
 app = Flask(__name__, static_url_path="", static_folder=".")
 if ALLOWED_ORIGINS and ALLOWED_ORIGINS != "*":
     origins = [o.strip() for o in ALLOWED_ORIGINS.split(",") if o.strip()]
-    CORS(app, resources={r"/*": {"origins": origins}})
+    from flask_cors import CORS  # <-- at top of file
+
+# ... after app = Flask(__name__)
+import os
+ALLOWED = os.getenv("ALLOWED_ORIGINS", "*")
+
+if not ALLOWED.strip() or ALLOWED == "*":
+    # staging-safe: allow everything
+    CORS(app, resources={r"/*": {"origins": "*"}})
 else:
-    CORS(app)
+    # strict list: comma-separated origins
+    CORS(app, resources={r"/*": {"origins": [o.strip() for o in ALLOWED.split(",")]}})
 
 # =========================
 # HELPERS: GEOCODING / LABELS
@@ -748,3 +757,4 @@ def root():
 if __name__ == "__main__":
     print(f"OPENSTATES_API_KEY loaded: {bool(OPENSTATES_API_KEY)}")
     app.run(host="127.0.0.1", port=int(os.getenv("PORT", "5000")), debug=True)
+
