@@ -706,6 +706,124 @@ def debug_trace():
         "base_overlays": FLOTERIAL_MAP_BASE.get(sldl_clean, []),
         "town_overlays": FLOTERIAL_MAP_TOWN.get(geo.get("town") or "", []),
     }, 200
+    
+# ==== JSON vote map (long or wide CSV) ====
+import csv, io, os, re, time
+from urllib.parse import urlparse
+import requests
+
+VOTES_CSV_URL = os.getenv("VOTES_CSV_URL", "").strip()
+VOTES_TTL_SECONDS = int(os.getenv("VOTES_TTL_SECONDS", "300"))
+
+_vote_cache = {"t": 0, "rows": [], "columns": []}
+
+def _read_text_from_url(url: str) -> str:
+    if url.startswith("file://"):
+        path = urlparse(url).path
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    r = requests.get(url, timeout=15)
+    r.raise_for_status()
+    return r.text
+
+def _parse_csv_text(text: str):
+    rdr = csv.reader(io.StringIO(text))
+    rows = list(rdr)
+    if not rows:
+        return [], []
+    headers = [h.strip() for h in rows[0]]
+    out = []
+    for r in rows[1:]:
+        d = {}
+        for i, h in enumerate(headers):
+            d[h] = r[i] if i < len(r) else ""
+        out.append(d)
+    return headers, out
+
+def _extract_bill_key(s: str) -> str:
+    m = re.search(r"(HB|SB|HR|HCR|SCR)\s*-?\s*(\d{1,4})(?:.*?(\d{4}))?", str(s or ""), re.I)
+    if m:
+        bill = f"{m.group(1).upper()}{m.group(2)}"
+        yr = m.group(3)
+        return f"{bill}_{yr}" if yr else bill
+    return re.sub(r"[^A-Za-z0-9]+", "_", str(s or "")).upper()
+
+def _load_votes_rows_cached():
+    now = time.time()
+    if _vote_cache["t"] and now - _vote_cache["t"] < VOTES_TTL_SECONDS:
+        return _vote_cache["rows"], _vote_cache["columns"]
+    if not VOTES_CSV_URL:
+        return [], []
+    text = _read_text_from_url(VOTES_CSV_URL)
+    headers, rows = _parse_csv_text(text)
+    cols = [h for h in headers if h not in ("openstates_person_id","person_id","id","name","district")]
+    _vote_cache.update({"t": now, "rows": rows, "columns": cols})
+    return rows, cols
+
+def _normkey(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(s or "").lower()).strip()
+
+def _build_vote_map(rows):
+    """Return dict: person_key -> { billKey: rawVote }.
+       Supports long (bill/vote) or wide (many bill columns) CSV."""
+    out = {}
+    is_long = any(("bill" in r and "vote" in r) for r in rows)
+
+    if is_long:
+        for r in rows:
+            pid = (r.get("openstates_person_id") or r.get("person_id") or r.get("id") or "").strip()
+            bill = _extract_bill_key(r.get("bill", ""))
+            if not bill:
+                continue
+            val = str(r.get("vote", ""))
+            name_key = _normkey(r.get("name", ""))
+            dist_key = _normkey(r.get("district", ""))
+
+            if pid:
+                out.setdefault(pid, {})[bill] = val
+            if name_key:
+                out.setdefault(f"name:{name_key}", {})[bill] = val
+            out.setdefault(f"nd:{name_key}|{dist_key}", {})[bill] = val
+        return out
+
+    # wide
+    for r in rows:
+        pid = (r.get("openstates_person_id") or r.get("person_id") or r.get("id") or "").strip()
+        row = {}
+        for k, v in r.items():
+            if k in ("openstates_person_id","person_id","id","name","district"):
+                continue
+            row[k] = str(v or "")
+        name_key = _normkey(r.get("name", ""))
+        dist_key = _normkey(r.get("district", ""))
+
+        if pid:
+            out[pid] = row
+        if name_key:
+            out[f"name:{name_key}"] = row
+        out[f"nd:{name_key}|{dist_key}"] = row
+    return out
+
+@app.get("/api/vote-map")
+def api_vote_map():
+    try:
+        rows, cols = _load_votes_rows_cached()
+        vote_map = _build_vote_map(rows)
+        # union of columns from the map (covers long CSV)
+        colset = set()
+        for d in vote_map.values():
+            colset.update(d.keys())
+        for junk in ("openstates_person_id","person_id","id","name","district"):
+            colset.discard(junk)
+        columns = sorted(colset) if colset else cols
+        return jsonify({
+            "columns": columns,
+            "votes": vote_map,
+            "rows": len(rows),
+            "source": VOTES_CSV_URL
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.get("/debug/district")
 def debug_district():
@@ -837,3 +955,4 @@ def root():
 if __name__ == "__main__":
     print(f"OPENSTATES_API_KEY loaded: {bool(OPENSTATES_API_KEY)}")
     app.run(host="127.0.0.1", port=int(os.getenv("PORT", "5000")), debug=True)
+
