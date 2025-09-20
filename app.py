@@ -543,6 +543,11 @@ def api_lookup_legislators():
     except Exception as e:
         logging.exception("lookup-legislators unhandled")
         return jsonify(_err_json("lookup-legislators", e)), 500
+      
+@app.get("/")
+def index():
+    return jsonify({"ok": True, "service": "nh-rep-finder-api", "routes": ["/health", "/api/lookup-legislators", "/api/vote-map"]})
+
 
 # =========================
 # DEBUG ROUTES
@@ -568,3 +573,4 @@ def debug_district():
 # =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=os.getenv("FLASK_DEBUG","0") == "1")
+
