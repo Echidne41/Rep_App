@@ -8,6 +8,33 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import requests
 
+# --- Gentle rate limiter: 60 requests / 60s per IP+path (with 30s cool-off) ---
+import time
+from flask import request, abort, jsonify
+
+RATE_LIMIT_PER_MIN = int(os.getenv("RATE_LIMIT_PER_MIN", "60"))
+RATE_WINDOW_SECS = 60
+COOL_OFF_SECS = 30
+_hits: dict[tuple[str, str], list[float]] = {}
+
+@app.before_request
+def _rate_limit_guard():
+    # Only guard API routes
+    if not request.path.startswith("/api/"):
+        return
+    ip = (request.headers.get("x-forwarded-for") or request.remote_addr or "?").split(",")[0].strip()
+    key = (ip, request.path)
+    now = time.time()
+    recent = [t for t in _hits.get(key, []) if now - t < RATE_WINDOW_SECS]
+    if len(recent) >= RATE_LIMIT_PER_MIN:
+        resp = jsonify({"error": "Too many requests, please retry shortly."})
+        resp.status_code = 429
+        resp.headers["Retry-After"] = str(COOL_OFF_SECS)
+        return resp
+    recent.append(now)
+    _hits[key] = recent
+
+
 # =========================
 # ENV & CONSTANTS
 # =========================
@@ -66,6 +93,16 @@ NH_FLOTERIAL_BY_TOWN_BUILTIN = {
 # APP & CORS
 # =========================
 app = Flask(__name__, static_url_path="", static_folder=".")
+
+# --- Security headers (simple, safe defaults) ---
+@app.after_request
+def _security_headers(resp):
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Referrer-Policy"] = "same-origin"
+    resp.headers["Permissions-Policy"] = "geolocation=()"
+    return resp
+
 
 ALLOWED = (os.getenv("ALLOWED_ORIGINS", "*") or "").strip()
 if not ALLOWED or ALLOWED == "*":
@@ -1035,5 +1072,6 @@ def root():
 if __name__ == "__main__":
     print(f"OPENSTATES_API_KEY loaded: {bool(OPENSTATES_API_KEY)}")
     app.run(host="127.0.0.1", port=int(os.getenv("PORT", "5000")), debug=True)
+
 
 
