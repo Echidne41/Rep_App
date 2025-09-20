@@ -286,6 +286,27 @@ def lookup_legislators():
         "stateRepresentatives": reps,
     })
 
+@app.get("/debug/peek")
+def debug_peek():
+    import itertools
+    def head(url):
+        try:
+            if url.startswith("file://"):
+                p = url.replace("file://","")
+                with open(p, "r", encoding="utf-8") as f:
+                    return {"ok": True, "path": p, "head": list(itertools.islice(f, 3))}
+            else:
+                r = requests.get(url, timeout=10)
+                r.raise_for_status()
+                txt = r.text.splitlines()[:3]
+                return {"ok": True, "url": url, "head": txt}
+        except Exception as e:
+            return {"ok": False, "err": str(e)}
+    return jsonify({
+        "base": head(os.getenv("FLOTERIAL_BASE_CSV_URL","")),
+        "town": head(os.getenv("FLOTERIAL_TOWN_CSV_URL","")),
+    })
+
 
 # -------------------------
 # Optional helpers: votes & bill link (simple, safe defaults)
@@ -324,3 +345,4 @@ def root():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
