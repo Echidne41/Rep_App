@@ -362,6 +362,109 @@ def bill_link():
 @app.get("/")
 def root():
     return jsonify({"ok": True, "see": "/health"})
+@app.get("/debug/diag")
+def debug_diag():
+    """One-shot trace for /api/lookup-legislators pipeline."""
+    addr = (request.args.get("address") or "").strip()
+    if not addr:
+        return jsonify({"ok": False, "error": "missing address"}), 400
+
+    # 1) Geocode
+    try:
+        lat, lon, meta = geocode_oneline(addr)
+    except Exception as e:
+        return jsonify({"ok": False, "stage": "geocode", "error": f"{type(e).__name__}: {e}"}), 500
+
+    town = meta.get("town"); county = meta.get("county")
+
+    # 2) CSV maps + inferred county
+    base_map, town_map = load_floterial_maps()
+    inferred = None
+    if (not county) and town:
+        poss = {c for (t, c) in town_map.keys() if t == town}
+        if len(poss) == 1:
+            county = inferred = next(iter(poss))
+
+    # overlay labels (pre/post fix)
+    raw_ov = sorted(list(town_map.get((town, county), set())))
+    fixed = []
+    for lbl in raw_ov:
+        s = str(lbl or "").strip()
+        if re.fullmatch(r"\d+", s) and county:
+            fixed.append(f"{county} {int(s)}")
+        else:
+            fixed.append(s)
+    ov_labels = [_norm_district(x) for x in fixed]
+
+    # 3) people.geo raw + filtered
+    people_raw = []
+    people_house = []
+    geo_status = None
+    try:
+        r = requests.get(
+            OS_PEOPLE_GEO,
+            params={"lat": lat, "lng": lon},
+            headers={"X-API-KEY": OPENSTATES_API_KEY} if OPENSTATES_API_KEY else {},
+            timeout=12
+        )
+        geo_status = r.status_code
+        j = r.json()
+        if isinstance(j, dict) and "results" in j:
+            people_raw = j["results"] or []
+        elif isinstance(j, list):
+            people_raw = j
+        people_house = _pick_house_members_from_people_geo(people_raw)
+    except Exception as e:
+        geo_status = f"error:{type(e).__name__}"
+
+    # 4) fallback districts + first query attempt status
+    districts_to_try = set(ov_labels)
+    for b, fset in base_map.items():
+        if fset & districts_to_try:
+            districts_to_try.add(b)
+    districts_to_try = sorted(list(districts_to_try))
+
+    fallback_try = []
+    headers = {"X-API-KEY": OPENSTATES_API_KEY} if OPENSTATES_API_KEY else {}
+    for d in districts_to_try[:3]:  # keep it short
+        variants = [
+            {"state": "NH", "chamber": "lower", "district": d},
+            {"jurisdiction": "New Hampshire", "chamber": "lower", "district": d},
+        ]
+        m = re.search(r"(\\d+)$", d)
+        if m:
+            variants.append({"state": "NH", "chamber": "lower", "district": m.group(1)})
+        vstats = []
+        for params in variants:
+            try:
+                rr = requests.get(OS_PEOPLE, params=params, headers=headers, timeout=12)
+                ok = rr.ok
+                cnt = len(rr.json() or []) if ok else None
+                vstats.append({"params": params, "status": rr.status_code, "count": cnt})
+            except Exception as e:
+                vstats.append({"params": params, "status": f"error:{type(e).__name__}"})
+        fallback_try.append({"district": d, "variants": vstats})
+
+    return jsonify({
+        "ok": True,
+        "addr": addr,
+        "geocode": {"lat": lat, "lon": lon, "town": town, "county": county, "inferred_county": inferred, "geocoder": meta.get("geocoder")},
+        "people_geo": {"status": geo_status, "raw_count": len(people_raw), "house_count": len(people_house),
+                       "house_sample": people_house[:3]},
+        "overlays": {"raw": raw_ov, "normalized": ov_labels},
+        "fallback_preview": fallback_try
+    })
+
+
+@app.get("/debug/row")
+def debug_row():
+    """Return the town CSV rows for quick verification."""
+    qtown = _title(request.args.get("town", ""))
+    base_rows = _read_csv_url(FLOTERIAL_BASE_CSV_URL)
+    town_rows = _read_csv_url(FLOTERIAL_TOWN_CSV_URL)
+    hits = [r for r in town_rows if _title(r.get("town","")) == qtown]
+    return jsonify({"town": qtown, "rows": hits[:10], "count": len(hits)})
+
 
 # =========================
 # MAIN (local dev)
@@ -369,3 +472,4 @@ def root():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
