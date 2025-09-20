@@ -915,6 +915,86 @@ def lookup_legislators_get():
     if not addr:
         return jsonify({"success": False, "error": {"message": "Missing address query param"}}), 400
     return _lookup_core(addr)
+# ===== Bill link lookup (OpenStates) =====
+import time, re, os
+import requests
+from flask import request, jsonify
+
+_OS_KEY = os.getenv("OPENSTATES_API_KEY", "").strip()
+_BILL_CACHE = {}  # { key: {url, t} }
+_BILL_TTL = 3600  # 1 hour
+
+def _extract_bill_code_year(s: str):
+    """
+    'HB148', 'HB148_2025', 'HB148 - LGBTQ Rights', 'VOTE_HB148_2025' → ('HB148', '2025' or None)
+    """
+    s = str(s or "")
+    m = re.search(r"(HB|SB|HR|HCR|SCR)\s*[-_ ]?\s*(\d{1,4})(?:.*?(\d{4}))?", s, re.I)
+    if not m:
+        return None, None
+    return f"{m.group(1).upper()}{m.group(2)}", (m.group(3) or None)
+
+def _pick_best_bill_url(item: dict) -> str:
+    # Prefer official sources
+    for src in (item.get("sources") or []):
+        u = src.get("url")
+        if u: return u
+    # Then known “links”
+    for lk in (item.get("links") or []):
+        u = lk.get("url")
+        if u: return u
+    # Fallback to OpenStates page
+    return item.get("openstates_url") or ""
+
+@app.get("/api/bill-link")
+def api_bill_link():
+    if not _OS_KEY:
+        return jsonify({"error": "OPENSTATES_API_KEY not set"}), 500
+
+    bill_param = request.args.get("bill", "")   # e.g. HB148
+    year_param = request.args.get("year", "")   # e.g. 2025 (optional)
+    # also accept raw column labels like "HB148 - LGBTQ Rights"
+    if not bill_param:
+        raw = request.args.get("label", "")
+        bill_param, y = _extract_bill_code_year(raw)
+        if y and not year_param:
+            year_param = y
+
+    bill_code, year = _extract_bill_code_year(bill_param or "")
+    if not bill_code:
+        return jsonify({"error": "bill not parseable"}), 400
+
+    cache_key = f"{bill_code}:{year or ''}"
+    now = time.time()
+    if cache_key in _BILL_CACHE and now - _BILL_CACHE[cache_key]["t"] < _BILL_TTL:
+        return jsonify({"bill": bill_code, "year": year, "url": _BILL_CACHE[cache_key]["url"]})
+
+    # Query OpenStates bills
+    params = {
+        "jurisdiction": "New Hampshire",
+        "q": bill_code.replace(" ", ""),  # HB148
+        "per_page": 3,
+    }
+    if year:
+        params["session"] = year  # OS v3 accepts session strings; year usually works in NH
+
+    r = requests.get(
+        "https://v3.openstates.org/bills",
+        headers={"X-API-KEY": _OS_KEY},
+        params=params,
+        timeout=15,
+    )
+    r.raise_for_status()
+    data = r.json() or {}
+    items = data.get("results") or data.get("data") or []
+
+    if not items:
+        _BILL_CACHE[cache_key] = {"url": "", "t": now}
+        return jsonify({"bill": bill_code, "year": year, "url": ""})  # frontend can hide button if empty
+
+    url = _pick_best_bill_url(items[0]) or ""
+    _BILL_CACHE[cache_key] = {"url": url, "t": now}
+    return jsonify({"bill": bill_code, "year": year, "url": url})
 
 @app.post("/api/lookup-with-votes")
 def lookup_with_votes_post():
@@ -955,4 +1035,5 @@ def root():
 if __name__ == "__main__":
     print(f"OPENSTATES_API_KEY loaded: {bool(OPENSTATES_API_KEY)}")
     app.run(host="127.0.0.1", port=int(os.getenv("PORT", "5000")), debug=True)
+
 
