@@ -233,3 +233,24 @@ def root():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
+@app.get("/debug/openstates-probe")
+def openstates_probe():
+    try:
+        r = requests.get(
+            "https://v3.openstates.org/people.geo",
+            params={"lat": 43.36, "lng": -72.30},
+            headers={"X-API-KEY": OPENSTATES_API_KEY} if OPENSTATES_API_KEY else {},
+            timeout=12,
+        )
+        return jsonify({
+            "status_code": r.status_code,
+            "rate_headers": {k:v for k,v in r.headers.items() if "ratelimit" in k.lower() or k.lower()=="retry-after"},
+            "ok": r.ok,
+            "has_key": bool(OPENSTATES_API_KEY),
+            "sample": (r.json()[:1] if r.ok else None),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}", "has_key": bool(OPENSTATES_API_KEY)}), 500
+
+
