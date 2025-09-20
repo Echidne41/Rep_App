@@ -18,6 +18,16 @@ import requests
 from flask import Flask, request, jsonify, abort, Response
 from flask_cors import CORS
 
+import logging, traceback
+logging.basicConfig(level=logging.INFO)
+def _err_json(stage: str, exc: Exception):
+    return {
+        "error": f"{stage} failed",
+        "type": exc.__class__.__name__,
+        "message": str(exc),
+    }
+
+
 # =========================
 # APP & CORS (create app first!)
 # =========================
@@ -448,43 +458,86 @@ def _overlay_district_labels(lat: float, lon: float, openstates_labels):
 # =========================
 @app.route("/api/lookup-legislators", methods=["GET", "POST"])
 def api_lookup_legislators():
-    addr = _get_address_from_request()
-    if not addr:
-        return jsonify({"error": "address is required", "hint": "Send ?address=... or JSON {address: ...}"}), 422
+    try:
+        # accept address from query, JSON, or form
+        addr = (request.args.get("address") or request.args.get("addr") or "").strip()
+        if not addr and request.is_json:
+            j = request.get_json(silent=True) or {}
+            addr = (j.get("address") or j.get("addr") or "").strip()
+        if not addr and request.form:
+            addr = (request.form.get("address") or request.form.get("addr") or "").strip()
+        if not addr:
+            return jsonify({"error": "address is required", "hint": "Send ?address=... or JSON {address: ...}"}), 422
 
-    lat, lon = _geocode_address(addr)
-    if lat is None or lon is None:
-        return jsonify({"address": addr, "geographies": {}, "stateRepresentatives": [], "source": {"geocoder": "none"}})
+        # geocode
+        try:
+            lat, lon = _geocode_address(addr)
+        except Exception as e:
+            logging.exception("geocode error")
+            return jsonify(_err_json("geocode", e)), 500
 
-    # Base: who does OS say at the point?
-    reps_point = _openstates_people_geo(lat, lon)
-    os_labels = [ (r.get("district") or "") for r in reps_point ]
+        if lat is None or lon is None:
+            return jsonify({
+                "address": addr,
+                "geographies": {},
+                "stateRepresentatives": [],
+                "source": {"geocoder": "none"}
+            })
 
-    # Overlay: add base→floterials + town→floterials
-    want_labels = _overlay_district_labels(lat, lon, os_labels)
+        # OpenStates at the point
+        try:
+            reps_point = _openstates_people_geo(lat, lon)
+        except Exception as e:
+            logging.exception("openstates people.geo error")
+            return jsonify(_err_json("people.geo", e)), 500
 
-    # Ensure coverage for all labels
-    have_by_label = { _norm_district_label(r.get("district") or "") for r in reps_point }
-    reps_extra = []
-    for lbl in want_labels:
-        if lbl and lbl not in have_by_label:
-            reps_extra.extend(_openstates_people_by_district_label(lbl))
+        os_labels = [(r.get("district") or "") for r in reps_point]
 
-    reps_all = _unique_reps(reps_point + reps_extra)
+        # overlay union (handles base→floterial + town→floterial)
+        try:
+            want_labels = _overlay_district_labels(lat, lon, os_labels)
+        except Exception as e:
+            logging.exception("overlay compute error")
+            return jsonify(_err_json("overlay", e)), 500
 
-    return jsonify({
-        "address": addr,
-        "geographies": { "town_county": list(_nominatim_reverse(lat, lon)) },
-        "stateRepresentatives": reps_all,
-        "source": {
-            "geocoder": "census_or_nominatim",
-            "openstates_geo": True,
-            "overlay_labels": sorted(list(want_labels))
-        }
-    })
+        # fill any missing district labels via /people
+        have_by_label = {_norm_district_label(r.get("district") or "") for r in reps_point}
+        reps_extra = []
+        try:
+            for lbl in want_labels:
+                if lbl and lbl not in have_by_label:
+                    reps_extra.extend(_openstates_people_by_district_label(lbl))
+        except Exception as e:
+            logging.exception("openstates people by district error")
+            return jsonify(_err_json("people(district)", e)), 500
+
+        reps_all = _unique_reps(reps_point + reps_extra)
+
+        # reverse for town/county (informational; never fatal)
+        try:
+            town, county = _nominatim_reverse(lat, lon)
+        except Exception:
+            town, county = "", ""
+
+        return jsonify({
+            "address": addr,
+            "geographies": {"town_county": [town, county]},
+            "stateRepresentatives": reps_all,
+            "source": {
+                "geocoder": "census_or_nominatim",
+                "openstates_geo": True,
+                "overlay_labels": sorted(list(want_labels))
+            }
+        })
+    except Exception as e:
+        # last-ditch guard: never 500 without context
+        logging.exception("lookup-legislators unhandled")
+        return jsonify(_err_json("lookup-legislators", e)), 500
+
 
 # =========================
 # MAIN
 # =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=os.getenv("FLASK_DEBUG","0") == "1")
+
