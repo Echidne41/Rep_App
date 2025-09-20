@@ -231,8 +231,15 @@ def lookup_legislators():
     county = meta.get("county")
 
     # 2) Ask OpenStates which people represent this point
-    people = openstates_people_geo(lat, lon)
-    house_from_geo = _pick_house_members_from_people_geo(people)
+    house_from_geo = []
+    people = []
+    try:
+        people = openstates_people_geo(lat, lon)
+        house_from_geo = _pick_house_members_from_people_geo(people)
+    except Exception:
+    # swallow OpenStates errors; we'll fall back to CSV overlays
+        pass
+
 
     # 3) Overlay labels (from our CSVs), informational
     base_map, town_map = load_floterial_maps()
@@ -345,4 +352,5 @@ def root():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
