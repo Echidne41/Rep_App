@@ -1,5 +1,5 @@
 """
-NH Rep Finder backend — clean drop-in with retries.
+NH Rep Finder backend — NH House only + floterials + retries + security.
 
 Routes:
   GET /health
@@ -43,7 +43,7 @@ def _security_headers(resp):
     return resp
 
 # =========================
-# GENTLE RATE LIMIT (60/min per IP+path; 30s retry)
+# GENTLE RATE LIMIT (60/min per IP+path; 30s retry-hint)
 # =========================
 RATE_LIMIT_PER_MIN = int(os.getenv("RATE_LIMIT_PER_MIN", "60"))
 RATE_WINDOW_SECS = 60
@@ -142,6 +142,9 @@ def _get_address_from_request():
     if not addr and request.form:
         addr = (request.form.get("address") or request.form.get("addr") or "").strip()
     return addr or None
+
+def _err_json(stage: str, exc: Exception):
+    return {"error": f"{stage} failed", "message": str(exc), "type": exc.__class__.__name__}
 
 # =========================
 # VOTE CSV → JSON MAP (long or wide)
@@ -264,7 +267,7 @@ def _load_floterials_cached():
     return by_base, by_town
 
 # =========================
-# BILL LINK VIA OPENSTATES
+# BILL LINK VIA OPENSTATES (with retry)
 # =========================
 def _pick_best_bill_url(item: dict) -> str:
     for src in (item.get("sources") or []):
@@ -292,14 +295,6 @@ def api_bill_link():
     if not bill_code:
         return jsonify({"bill": bill_param or "", "year": year_param or "", "url": ""})
 
-    cache_key = f"{bill_code}:{year or ''}"
-    now = time.time()
-    if not hasattr(app, "_BILL_CACHE"):
-        app._BILL_CACHE = {}
-    cache = app._BILL_CACHE
-    if cache_key in cache and now - cache[cache_key]["t"] < 3600:
-        return jsonify({"bill": bill_code, "year": year, "url": cache[cache_key]["url"]})
-
     url = "https://v3.openstates.org/bills"
     params = {"jurisdiction": "New Hampshire", "q": bill_code.replace(" ", ""), "per_page": 3}
     if year: params["session"] = year
@@ -316,11 +311,14 @@ def api_bill_link():
 
     items = (r.json() or {}).get("results") or (r.json() or {}).get("data") or []
     url_out = _pick_best_bill_url(items[0]) if items else ""
-    cache[cache_key] = {"url": url_out, "t": now}
+    # tiny in-memory cache (1h)
+    if not hasattr(app, "_BILL_CACHE"):
+        app._BILL_CACHE = {}
+    app._BILL_CACHE[f"{bill_code}:{year or ''}"] = {"url": url_out, "t": time.time()}
     return jsonify({"bill": bill_code, "year": year, "url": url_out})
 
 # =========================
-# OPENSTATES LOOKUPS (WITH RETRY)
+# OPENSTATES LOOKUPS (lower chamber only, with retry)
 # =========================
 CENSUS_URL = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
@@ -352,13 +350,30 @@ def _geocode_address(addr: str):
             pass
     return None, None
 
+def _is_lower_house(item, fallback_label=""):
+    """Return True only for NH House members (lower chamber)."""
+    org = (item.get("organization") or item.get("org") or {})
+    if (org.get("classification") or "").lower() == "lower":
+        return True
+    person = item.get("person") or item
+    roles = person.get("roles") or person.get("current_roles") or []
+    if isinstance(roles, list):
+        for r in roles:
+            if (r.get("org_classification") or "").lower() == "lower": return True
+            if (r.get("chamber") or "").lower() == "lower": return True
+    d = item.get("district") or {}
+    text = " ".join([str(d.get("name") or ""), str(d.get("label") or ""), str(fallback_label or "")]).lower()
+    if "senate" in text or "congress" in text or "united states" in text: return False
+    if "house" in text: return True
+    norm = _norm_district_label(d.get("name") or d.get("label") or fallback_label or "")
+    return bool(re.match(r"^[A-Za-z]+\s+\d+$", norm))
+
 def _openstates_people_geo(lat: float, lon: float):
-    """OpenStates /people.geo with retry (lng param)."""
+    """OpenStates /people.geo (lng param), NH-only, lower chamber, with retry."""
     if not OPENSTATES_API_KEY:
         return []
-
     url = "https://v3.openstates.org/people.geo"
-    params  = {"lat": lat, "lng": lon, "per_page": 50}  # NOTE: lng, not lon
+    params  = {"lat": lat, "lng": lon, "per_page": 50, "jurisdiction": "New Hampshire"}
     headers = {"X-API-KEY": OPENSTATES_API_KEY}
 
     r = requests.get(url, params=params, headers=headers, timeout=20)
@@ -374,8 +389,11 @@ def _openstates_people_geo(lat: float, lon: float):
 
     data = r.json() or {}
     results = data.get("results") or data.get("data") or []
+
     reps = []
     for item in results:
+        if not _is_lower_house(item):
+            continue
         person   = item.get("person") or item
         district = item.get("district") or {}
         name     = person.get("name") or person.get("given_name") or ""
@@ -385,7 +403,7 @@ def _openstates_people_geo(lat: float, lon: float):
             "openstates_person_id": person.get("id") or person.get("openstates_id") or "",
             "name": name,
             "party": party,
-            "district": district.get("name") or district.get("label") or None,
+            "district": _norm_district_label(district.get("name") or district.get("label") or ""),
             "email": person.get("email"),
             "phone": person.get("phone"),
             "links": person.get("links") or []
@@ -393,7 +411,7 @@ def _openstates_people_geo(lat: float, lon: float):
     return reps
 
 def _openstates_people_by_district_label(label: str):
-    """OpenStates /people (by district label) with retry."""
+    """OpenStates /people (by district), NH-only, lower chamber, with retry."""
     if not OPENSTATES_API_KEY:
         return []
     url = "https://v3.openstates.org/people"
@@ -415,6 +433,8 @@ def _openstates_people_by_district_label(label: str):
     results = data.get("results") or data.get("data") or []
     reps = []
     for item in results:
+        if not _is_lower_house(item, fallback_label=label):
+            continue
         p = item.get("person") or item
         d = item.get("district") or {}
         parties = p.get("party") or p.get("current_parties") or []
@@ -423,7 +443,7 @@ def _openstates_people_by_district_label(label: str):
             "openstates_person_id": p.get("id") or "",
             "name": p.get("name") or p.get("given_name") or "",
             "party": party,
-            "district": d.get("name") or d.get("label") or _norm_district_label(label),
+            "district": _norm_district_label(d.get("name") or d.get("label") or label),
             "email": p.get("email"),
             "phone": p.get("phone"),
             "links": p.get("links") or []
@@ -441,7 +461,7 @@ def _nominatim_reverse(lat: float, lon: float):
         r.raise_for_status()
         a = (r.json() or {}).get("address") or {}
         town = a.get("town") or a.get("city") or a.get("village") or a.get("municipality") or ""
-        county = (a.get("county") or "").replace(" County","").strip()
+        county = (a.get("county") or "").replace(" County", "").strip()
         return _norm_town(town), county.title()
     except Exception:
         return "", ""
@@ -463,9 +483,6 @@ def _overlay_district_labels(lat: float, lon: float, openstates_labels):
 # =========================
 # LOOKUP ROUTE (hardened)
 # =========================
-def _err_json(stage: str, exc: Exception):
-    return {"error": f"{stage} failed", "message": str(exc), "type": exc.__class__.__name__}
-
 @app.route("/api/lookup-legislators", methods=["GET", "POST"])
 def api_lookup_legislators():
     try:
