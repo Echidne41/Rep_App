@@ -243,14 +243,31 @@ def openstates_probe():
             headers={"X-API-KEY": OPENSTATES_API_KEY} if OPENSTATES_API_KEY else {},
             timeout=12,
         )
+        # parse JSON safely
+        try:
+            body = r.json()
+        except Exception:
+            body = None
+
+        if isinstance(body, list):
+            sample = body[:1]
+        elif isinstance(body, dict):
+            sample = {k: body.get(k) for k in list(body.keys())[:5]}  # small peek
+        else:
+            sample = None
+
         return jsonify({
-            "status_code": r.status_code,
-            "rate_headers": {k:v for k,v in r.headers.items() if "ratelimit" in k.lower() or k.lower()=="retry-after"},
-            "ok": r.ok,
             "has_key": bool(OPENSTATES_API_KEY),
-            "sample": (r.json()[:1] if r.ok else None),
+            "status_code": r.status_code,
+            "ok": r.ok,
+            "rate_headers": {k:v for k,v in r.headers.items()
+                             if "ratelimit" in k.lower() or k.lower()=="retry-after"},
+            "sample": sample,
+            "error_text": None if r.ok else (r.text[:400] if r.text else None),
         })
     except Exception as e:
-        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}", "has_key": bool(OPENSTATES_API_KEY)}), 500
+        return jsonify({"ok": False, "has_key": bool(OPENSTATES_API_KEY),
+                        "error": f"{type(e).__name__}: {e}"}), 500
+
 
 
