@@ -1,164 +1,164 @@
-base_district,floterial_district
-Be 1,
-Be 2,
-Be 3,Be 8
-Be 4,Be 8
-Be 5,
-Be 6,
-Be 7,
-Ca 1,
-Ca 2,
-Ca 3,Ca 8
-Ca 4,Ca 8
-Ca 5,Ca 7
-Ca 6,Ca 7
-Ch 1,Ch 15
-Ch 10,Ch 17
-Ch 11,Ch 17
-Ch 12,Ch 17
-Ch 13,Ch 18
-Ch 14,Ch 18
-Ch 2,Ch 15
-Ch 3,Ch 15
-Ch 4,Ch 15
-Ch 5,Ch 15
-Ch 6,Ch 15
-Ch 7,
-Ch 8,Ch 16
-Ch 9,Ch 16
-Co 2,
-Co 3,
-Co 4,Co 7
-Co 5,Co 7
-Co 6,
-Gr 1,
-Gr 10,Gr 18
-Gr 11,Gr 18
-Gr 12,
-Gr 13,Gr 17
-Gr 14,Gr 17
-Gr 15,Gr 17
-Gr 16,Gr 18
-Gr 2,
-Gr 3,
-Gr 4,
-Gr 5,
-Gr 6,
-Gr 7,
-Gr 8,
-Gr 9,Gr 18
-Hi 1,
-Hi 10,
-Hi 11,
-Hi 12,
-Hi 13,Hi 38
-Hi 14,Hi 38
-Hi 15,Hi 39
-Hi 16,Hi 39
-Hi 17,Hi 41
-Hi 18,Hi 40
-Hi 19,Hi 40
-Hi 2,
-Hi 20,Hi 39
-Hi 21,Hi 40
-Hi 22,Hi 40
-Hi 23,Hi 40
-Hi 24,Hi 41
-Hi 25,Hi 41
-Hi 26,Hi 41
-Hi 27,
-Hi 28,Hi 44
-Hi 29,Hi 44
-Hi 3,
-Hi 30,
-Hi 31,
-Hi 32,
-Hi 33,
-Hi 34,Hi 37
-Hi 35,Hi 45
-Hi 36,Hi 45
-Hi 4,
-Hi 42,
-Hi 43,Hi 37
-Hi 5,
-Hi 6,
-Hi 7,
-Hi 8,
-Hi 9,
-Me 1,Me 26
-Me 10,
-Me 11,Me 27
-Me 12,
-Me 13,
-Me 14,Me 27
-Me 15,Me 28
-Me 16,Me 28
-Me 17,Me 28
-Me 18,Me 29
-Me 19,Me 30
-Me 2,Me 25
-Me 20,Me 30
-Me 21,Me 30
-Me 22,
-Me 23,Me 29
-Me 24,Me 29
-Me 3,Me 25
-Me 4,Me 26
-Me 5,Me 26
-Me 6,
-Me 7,
-Me 8,
-Me 9,
-Ro 1,
-Ro 10,Ro 33
-Ro 11,Ro 33
-Ro 12,Ro 33
-Ro 13,
-Ro 14,Ro 34
-Ro 15,Ro 34
-Ro 16,Ro 35
-Ro 17,Ro 35
-Ro 18,
-Ro 19,Ro 36
-Ro 2,Ro 31
-Ro 20,Ro 36
-Ro 21,Ro 37
-Ro 22,Ro 37
-Ro 23,Ro 38
-Ro 24,Ro 39
-Ro 25,
-Ro 26,Ro 39
-Ro 27,Ro 39
-Ro 28,Ro 39
-Ro 29,Ro 40
-Ro 3,Ro 31
-Ro 30,Ro 40
-Ro 4,
-Ro 5,
-Ro 6,Ro 32
-Ro 7,Ro 32
-Ro 8,Ro 32
-Ro 9,
-St 1,
-St 10,St 20
-St 11,St 20
-St 12,
-St 13,St 21
-St 14,St 21
-St 15,St 21
-St 16,St 21
-St 17,St 21
-St 2,
-St 3,St 18
-St 4,St 18
-St 5,St 19
-St 6,St 19
-St 7,St 19
-St 8,St 19
-St 9,St 19
-Su 1,
-Su 2,Su 7
-Su 3,Su 7
-Su 4,Su 8
-Su 5,Su 8
-Su 6,Su 8
+﻿"base_district","floterial_district"
+"Belknap 1",""
+"Belknap 2",""
+"Belknap 3","Belknap 8"
+"Belknap 4","Belknap 8"
+"Belknap 5",""
+"Belknap 6",""
+"Belknap 7",""
+"Carroll 1",""
+"Carroll 2",""
+"Carroll 3","Carroll 8"
+"Carroll 4","Carroll 8"
+"Carroll 5","Carroll 7"
+"Carroll 6","Carroll 7"
+"Cheshire 1","Cheshire 15"
+"Cheshire 10","Cheshire 17"
+"Cheshire 11","Cheshire 17"
+"Cheshire 12","Cheshire 17"
+"Cheshire 13","Cheshire 18"
+"Cheshire 14","Cheshire 18"
+"Cheshire 2","Cheshire 15"
+"Cheshire 3","Cheshire 15"
+"Cheshire 4","Cheshire 15"
+"Cheshire 5","Cheshire 15"
+"Cheshire 6","Cheshire 15"
+"Cheshire 7",""
+"Cheshire 8","Cheshire 16"
+"Cheshire 9","Cheshire 16"
+"Coos 2",""
+"Coos 3",""
+"Coos 4","Coos 7"
+"Coos 5","Coos 7"
+"Coos 6",""
+"Grafton 1",""
+"Grafton 10","Grafton 18"
+"Grafton 11","Grafton 18"
+"Grafton 12",""
+"Grafton 13","Grafton 17"
+"Grafton 14","Grafton 17"
+"Grafton 15","Grafton 17"
+"Grafton 16","Grafton 18"
+"Grafton 2",""
+"Grafton 3",""
+"Grafton 4",""
+"Grafton 5",""
+"Grafton 6",""
+"Grafton 7",""
+"Grafton 8",""
+"Grafton 9","Grafton 18"
+"Hillsborough 1",""
+"Hillsborough 10",""
+"Hillsborough 11",""
+"Hillsborough 12",""
+"Hillsborough 13","Hillsborough 38"
+"Hillsborough 14","Hillsborough 38"
+"Hillsborough 15","Hillsborough 39"
+"Hillsborough 16","Hillsborough 39"
+"Hillsborough 17","Hillsborough 41"
+"Hillsborough 18","Hillsborough 40"
+"Hillsborough 19","Hillsborough 40"
+"Hillsborough 2",""
+"Hillsborough 20","Hillsborough 39"
+"Hillsborough 21","Hillsborough 40"
+"Hillsborough 22","Hillsborough 40"
+"Hillsborough 23","Hillsborough 40"
+"Hillsborough 24","Hillsborough 41"
+"Hillsborough 25","Hillsborough 41"
+"Hillsborough 26","Hillsborough 41"
+"Hillsborough 27",""
+"Hillsborough 28","Hillsborough 44"
+"Hillsborough 29","Hillsborough 44"
+"Hillsborough 3",""
+"Hillsborough 30",""
+"Hillsborough 31",""
+"Hillsborough 32",""
+"Hillsborough 33",""
+"Hillsborough 34","Hillsborough 37"
+"Hillsborough 35","Hillsborough 45"
+"Hillsborough 36","Hillsborough 45"
+"Hillsborough 4",""
+"Hillsborough 42",""
+"Hillsborough 43","Hillsborough 37"
+"Hillsborough 5",""
+"Hillsborough 6",""
+"Hillsborough 7",""
+"Hillsborough 8",""
+"Hillsborough 9",""
+"Merrimack 1","Merrimack 26"
+"Merrimack 10",""
+"Merrimack 11","Merrimack 27"
+"Merrimack 12",""
+"Merrimack 13",""
+"Merrimack 14","Merrimack 27"
+"Merrimack 15","Merrimack 28"
+"Merrimack 16","Merrimack 28"
+"Merrimack 17","Merrimack 28"
+"Merrimack 18","Merrimack 29"
+"Merrimack 19","Merrimack 30"
+"Merrimack 2","Merrimack 25"
+"Merrimack 20","Merrimack 30"
+"Merrimack 21","Merrimack 30"
+"Merrimack 22",""
+"Merrimack 23","Merrimack 29"
+"Merrimack 24","Merrimack 29"
+"Merrimack 3","Merrimack 25"
+"Merrimack 4","Merrimack 26"
+"Merrimack 5","Merrimack 26"
+"Merrimack 6",""
+"Merrimack 7",""
+"Merrimack 8",""
+"Merrimack 9",""
+"Rockingham 1",""
+"Rockingham 10","Rockingham 33"
+"Rockingham 11","Rockingham 33"
+"Rockingham 12","Rockingham 33"
+"Rockingham 13",""
+"Rockingham 14","Rockingham 34"
+"Rockingham 15","Rockingham 34"
+"Rockingham 16","Rockingham 35"
+"Rockingham 17","Rockingham 35"
+"Rockingham 18",""
+"Rockingham 19","Rockingham 36"
+"Rockingham 2","Rockingham 31"
+"Rockingham 20","Rockingham 36"
+"Rockingham 21","Rockingham 37"
+"Rockingham 22","Rockingham 37"
+"Rockingham 23","Rockingham 38"
+"Rockingham 24","Rockingham 39"
+"Rockingham 25",""
+"Rockingham 26","Rockingham 39"
+"Rockingham 27","Rockingham 39"
+"Rockingham 28","Rockingham 39"
+"Rockingham 29","Rockingham 40"
+"Rockingham 3","Rockingham 31"
+"Rockingham 30","Rockingham 40"
+"Rockingham 4",""
+"Rockingham 5",""
+"Rockingham 6","Rockingham 32"
+"Rockingham 7","Rockingham 32"
+"Rockingham 8","Rockingham 32"
+"Rockingham 9",""
+"Strafford 1",""
+"Strafford 10","Strafford 20"
+"Strafford 11","Strafford 20"
+"Strafford 12",""
+"Strafford 13","Strafford 21"
+"Strafford 14","Strafford 21"
+"Strafford 15","Strafford 21"
+"Strafford 16","Strafford 21"
+"Strafford 17","Strafford 21"
+"Strafford 2",""
+"Strafford 3","Strafford 18"
+"Strafford 4","Strafford 18"
+"Strafford 5","Strafford 19"
+"Strafford 6","Strafford 19"
+"Strafford 7","Strafford 19"
+"Strafford 8","Strafford 19"
+"Strafford 9","Strafford 19"
+"Sullivan 1",""
+"Sullivan 2","Sullivan 7"
+"Sullivan 3","Sullivan 7"
+"Sullivan 4","Sullivan 8"
+"Sullivan 5","Sullivan 8"
+"Sullivan 6","Sullivan 8"
