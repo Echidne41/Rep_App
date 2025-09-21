@@ -42,14 +42,17 @@ CORS(app, resources={r"/*": {"origins": ALLOWED_ORIGINS.split(",") if ALLOWED_OR
 # =========================
 # Utilities
 # =========================
+
 def _http_get(url: str, params: dict | None = None, headers: dict | None = None, timeout: int = 18):
     r = requests.get(url, params=params or {}, headers=headers or {}, timeout=timeout)
     app.logger.info(f"GET {url} {r.status_code} params={params}")
     r.raise_for_status()
     return r
 
+
 def _title(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip()).title()
+
 
 def _norm_district(label: str) -> str:
     m = re.search(r"([A-Za-z]+)\s*0*([0-9]+)", (label or ""))
@@ -80,6 +83,7 @@ def _read_csv_url(url: str) -> List[dict]:
     _csv_cache[url] = (now, rows)
     return rows
 
+
 def load_floterial_maps() -> Tuple[Dict[str, set], Dict[Tuple[str, str], set]]:
     base_rows = _read_csv_url(FLOTERIAL_BASE_CSV_URL)
     town_rows = _read_csv_url(FLOTERIAL_TOWN_CSV_URL)
@@ -103,6 +107,7 @@ def load_floterial_maps() -> Tuple[Dict[str, set], Dict[Tuple[str, str], set]]:
 # =========================
 # Geocoding (Census → Nominatim)
 # =========================
+
 def geocode_oneline(addr: str) -> Tuple[float, float, dict]:
     # Census
     try:
@@ -115,10 +120,7 @@ def geocode_oneline(addr: str) -> Tuple[float, float, dict]:
     except Exception:
         pass
     # Nominatim
-    r = _http_get(NOMINATIM_URL, params={
-        "q": addr, "format": "json", "addressdetails": 1, "countrycodes": "us",
-        "state": "New Hampshire", "limit": 1
-    }, headers={"User-Agent": "NH-Rep-Finder/1.0"})
+    r = _http_get(NOMINATIM_URL, params={"q": addr, "format": "json", "addressdetails": 1, "countrycodes": "us", "state": "New Hampshire", "limit": 1}, headers={"User-Agent": "NH-Rep-Finder/1.0"})
     j = r.json() or []
     if not j:
         raise ValueError("geocoding_failed")
@@ -130,28 +132,36 @@ def geocode_oneline(addr: str) -> Tuple[float, float, dict]:
     return lat, lon, {"town": town, "county": county, "geocoder": "nominatim"}
 
 # =========================
-# OpenStates helpers
+# OpenStates helpers — FIXED HOUSE FILTER
 # =========================
+
 def openstates_people_geo(lat: float, lon: float) -> List[dict]:
     params = {"lat": lat, "lng": lon}
     headers = {"X-API-KEY": OPENSTATES_API_KEY} if OPENSTATES_API_KEY else {}
     r = _http_get(OS_PEOPLE_GEO, params=params, headers=headers)
     j = r.json()
-    # v3 returns dict with pagination + results
     if isinstance(j, dict) and "results" in j:
         return j.get("results") or []
     if isinstance(j, list):
         return j
     return []
 
+
 def _pick_house_members_from_people_geo(people: List[dict]) -> List[dict]:
+    def j_name(j):
+        if isinstance(j, dict):
+            return (j.get("name") or "").lower()
+        return (j or "").lower()
+
+    def is_lower_nh(role: dict) -> bool:
+        lower = role.get("org_classification") == "lower" or role.get("chamber") == "lower"
+        return lower and ("new hampshire" in j_name(role.get("jurisdiction")))
+
     out: List[dict] = []
     for p in people or []:
         role = p.get("current_role") or {}
-        def _is_lower_nh(r: dict) -> bool:
-            return (r.get("chamber") == "lower") and ("new hampshire" in (r.get("jurisdiction", "").lower() or ""))
-        if not _is_lower_nh(role):
-            role = next((r for r in (p.get("roles") or []) if _is_lower_nh(r)), None)
+        if not is_lower_nh(role):
+            role = next((r for r in (p.get("roles") or []) if is_lower_nh(r)), None)
             if not role:
                 continue
         out.append({
@@ -160,13 +170,14 @@ def _pick_house_members_from_people_geo(people: List[dict]) -> List[dict]:
             "district": role.get("district") or "",
             "email": p.get("email"),
             "phone": p.get("voice"),
-            "links": [{"url": L.get("url")} for L in (p.get("links") or []) if L.get("url")],
+            "links": [{"url": L.get("url")} for L in (p.get("links") or []) if L and L.get("url")],
         })
     return out
 
 # =========================
 # Routes
 # =========================
+
 @app.get("/health")
 def health():
     base_rows = _read_csv_url(FLOTERIAL_BASE_CSV_URL)
@@ -196,16 +207,22 @@ def debug_peek():
         except Exception as e:
             return {"ok": False, "err": str(e)}
     return jsonify({
-        "base": head(os.getenv("FLOTERIAL_BASE_CSV_URL","")),
-        "town": head(os.getenv("FLOTERIAL_TOWN_CSV_URL","")),
+        "base": head(os.getenv("FLOTERIAL_BASE_CSV_URL", "")),
+        "town": head(os.getenv("FLOTERIAL_TOWN_CSV_URL", "")),
     })
 
 @app.get("/debug/floterials")
 def debug_floterials():
     try:
         base_map, town_map = load_floterial_maps()
-        base_sample = [{"base": k, "floterials": sorted(list(v))} for k, v in list(base_map.items())[:5]]
-        town_sample = [{"town": k[0], "county": k[1], "floterials": sorted(list(v))} for k, v in list(town_map.items())[:5]]
+        base_sample = [
+            {"base": k, "floterials": sorted(list(v))}
+            for k, v in list(base_map.items())[:5]
+        ]
+        town_sample = [
+            {"town": k[0], "county": k[1], "floterials": sorted(list(v))}
+            for k, v in list(town_map.items())[:5]
+        ]
         return jsonify({
             "base_to_floterial_count": sum(len(v) for v in base_map.values()),
             "town_to_floterial_count": sum(len(v) for v in town_map.values()),
@@ -217,9 +234,7 @@ def debug_floterials():
 @app.get("/debug/openstates-probe")
 def openstates_probe():
     try:
-        r = requests.get(OS_PEOPLE_GEO, params={"lat": 43.36, "lng": -72.30},
-                         headers={"X-API-KEY": OPENSTATES_API_KEY} if OPENSTATES_API_KEY else {},
-                         timeout=12)
+        r = requests.get(OS_PEOPLE_GEO, params={"lat": 43.36, "lng": -72.30}, headers={"X-API-KEY": OPENSTATES_API_KEY} if OPENSTATES_API_KEY else {}, timeout=12)
         try:
             body = r.json()
         except Exception:
@@ -230,9 +245,7 @@ def openstates_probe():
             samp = body[:1]
         else:
             samp = None
-        return jsonify({"has_key": bool(OPENSTATES_API_KEY), "status_code": r.status_code, "ok": r.ok,
-                        "rate_headers": {k: v for k, v in r.headers.items() if "ratelimit" in k.lower() or k.lower()=="retry-after"},
-                        "sample": samp})
+        return jsonify({"has_key": bool(OPENSTATES_API_KEY), "status_code": r.status_code, "ok": r.ok, "rate_headers": {k: v for k, v in r.headers.items() if "ratelimit" in k.lower() or k.lower() == "retry-after"}, "sample": samp})
     except Exception as e:
         return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}", "has_key": bool(OPENSTATES_API_KEY)}), 500
 
@@ -240,7 +253,7 @@ def openstates_probe():
 def debug_row():
     qtown = _title(request.args.get("town", ""))
     town_rows = _read_csv_url(FLOTERIAL_TOWN_CSV_URL)
-    hits = [r for r in town_rows if _title(r.get("town","")) == qtown]
+    hits = [r for r in town_rows if _title(r.get("town", "")) == qtown]
     return jsonify({"town": qtown, "rows": hits[:10], "count": len(hits)})
 
 @app.get("/debug/diag")
@@ -278,8 +291,7 @@ def debug_diag():
     people_house = []
     geo_status = None
     try:
-        r = requests.get(OS_PEOPLE_GEO, params={"lat": lat, "lng": lon},
-                         headers={"X-API-KEY": OPENSTATES_API_KEY} if OPENSTATES_API_KEY else {}, timeout=12)
+        r = requests.get(OS_PEOPLE_GEO, params={"lat": lat, "lng": lon}, headers={"X-API-KEY": OPENSTATES_API_KEY} if OPENSTATES_API_KEY else {}, timeout=12)
         geo_status = r.status_code
         j = r.json()
         if isinstance(j, dict) and "results" in j:
@@ -301,8 +313,8 @@ def debug_diag():
     headers = {"X-API-KEY": OPENSTATES_API_KEY} if OPENSTATES_API_KEY else {}
     for d in districts_to_try[:3]:
         variants = [
-            {"state": "NH", "chamber": "lower", "district": d},
             {"jurisdiction": "New Hampshire", "chamber": "lower", "district": d},
+            {"state": "NH", "chamber": "lower", "district": d},
         ]
         m = re.search(r"(\d+)$", d)
         if m:
@@ -322,8 +334,7 @@ def debug_diag():
         "ok": True,
         "addr": addr,
         "geocode": {"lat": lat, "lon": lon, "town": town, "county": county, "inferred_county": inferred, "geocoder": meta.get("geocoder")},
-        "people_geo": {"status": geo_status, "raw_count": len(people_raw), "house_count": len(people_house),
-                       "house_sample": people_house[:3]},
+        "people_geo": {"status": geo_status, "raw_count": len(people_raw), "house_count": len(people_house), "house_sample": people_house[:3]},
         "overlays": {"raw": raw_ov, "normalized": ov_labels},
         "fallback_preview": fallback_try
     })
@@ -341,7 +352,7 @@ def lookup_legislators():
         return jsonify({"success": False, "error": "geocoding_failed"}), 400
     town = meta.get("town"); county = meta.get("county")
 
-    # 2) people.geo (never crash)
+    # 2) people.geo (never crash); FIXED house filter
     house_from_geo = []
     try:
         people = openstates_people_geo(lat, lon)
@@ -375,7 +386,7 @@ def lookup_legislators():
             "stateRepresentatives": house_from_geo,
         })
 
-    # 5) Fallback: /people variants
+    # 5) Fallback: /people variants (prefer jurisdiction form first)
     reps: List[dict] = []
     try:
         districts_to_try = set(overlay_labels)
@@ -394,8 +405,8 @@ def lookup_legislators():
             if not d:
                 continue
             variants = [
-                {"state": "NH", "chamber": "lower", "district": d},
                 {"jurisdiction": "New Hampshire", "chamber": "lower", "district": d},
+                {"state": "NH", "chamber": "lower", "district": d},
             ]
             m = re.search(r"(\d+)$", d)
             if m:
@@ -425,7 +436,7 @@ def lookup_legislators():
         "stateRepresentatives": reps,
     })
 
-# simple helpers
+# Simple helpers
 @app.get("/api/vote-map")
 def vote_map():
     if not VOTES_CSV_URL:
