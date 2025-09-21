@@ -6,7 +6,7 @@ import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-# ---------- ENV ----------
+# ---------------- ENV ----------------
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -27,11 +27,11 @@ OS_PEOPLE_GEO = f"{OS_ROOT}/people.geo"
 CENSUS_GEOCODER_URL = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
 NOMINATIM_URL       = "https://nominatim.openstreetmap.org/search"
 
-# ---------- APP ----------
+# ---------------- APP ----------------
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": ALLOWED_ORIGINS.split(",") if ALLOWED_ORIGINS else ["*"]}})
 
-# ---------- HELPERS ----------
+# ---------------- HELPERS ----------------
 def _http_get(url: str, params: dict | None = None, headers: dict | None = None, timeout: int = 18):
     r = requests.get(url, params=params or {}, headers=headers or {}, timeout=timeout)
     app.logger.info(f"GET {url} {r.status_code} params={params}")
@@ -53,7 +53,19 @@ def _norm_district(label: str) -> str:
         return (label or "").strip()
     return f"{m.group(1).title()} {int(m.group(2))}"
 
-# ---------- CSV LOAD (CACHED) ----------
+# --- expand county abbreviations like "Me 30" -> "Merrimack 30"
+ABBR = {
+  'Be':'Belknap','Ca':'Carroll','Ch':'Cheshire','Co':'Coos','Gr':'Grafton',
+  'Hi':'Hillsborough','Me':'Merrimack','Ro':'Rockingham','St':'Strafford','Su':'Sullivan'
+}
+def _expand_label(s: str) -> str:
+    s = (s or "").strip()
+    m = re.match(r'^(..)\s+(\d+)$', s)
+    if m and m.group(1) in ABBR:
+        return f"{ABBR[m.group(1)]} {int(m.group(2))}"
+    return s
+
+# ---------------- CSV LOAD (CACHED) ----------------
 _csv_cache: Dict[str, Tuple[float, List[dict]]] = {}
 
 def _read_csv_url(url: str) -> List[dict]:
@@ -78,27 +90,30 @@ def load_floterial_maps() -> Tuple[Dict[str, set], Dict[Tuple[str, str], set]]:
     base_rows = _read_csv_url(FLOTERIAL_BASE_CSV_URL)
     town_rows = _read_csv_url(FLOTERIAL_TOWN_CSV_URL)
 
+    # base_district -> floterial_district (expand abbreviations, normalize)
     base_map: Dict[str, set] = {}
     for r in base_rows:
-        b = (r.get("base_district") or "").strip()
-        f = (r.get("floterial_district") or r.get("district") or "").strip()
+        b = _norm_district(_expand_label(r.get("base_district") or r.get("base") or ""))
+        f = _norm_district(_expand_label(r.get("floterial_district") or r.get("district") or ""))
         if b and f:
-            base_map.setdefault(_norm_district(b), set()).add(_norm_district(f))
+            base_map.setdefault(b, set()).add(f)
 
+    # (town, county) -> floterial_district (rebuild "<County> <num>" when needed)
     town_map: Dict[Tuple[str, str], set] = {}
     for r in town_rows:
-        town   = _title(r.get("town", ""))
-        county = _title((r.get("county", "").replace(" County", "")).strip())
+        town   = _title(r.get("town",""))
+        county = _title((r.get("county","")).replace(" County",""))
         fd     = (r.get("floterial_district") or r.get("district") or "").strip()
-        # If fd looks abbreviated like "Me 30", rebuild "<County> <num>"
-        m = re.search(r"(\d+)$", fd)
-        if county and m and (len((fd.split() or [''])[0]) < 4):
+        m = re.search(r'(\d+)$', fd)
+        if m:
             fd = f"{county} {int(m.group(1))}"
+        fd = _norm_district(_expand_label(fd))
         if town and county and fd:
-            town_map.setdefault(_key(town, county), set()).add(_norm_district(fd))
+            town_map.setdefault(_key(town, county), set()).add(fd)
+
     return base_map, town_map
 
-# ---------- GEOCODING ----------
+# ---------------- GEOCODING ----------------
 def geocode_oneline(addr: str) -> Tuple[float, float, dict]:
     try:
         r = _http_get(CENSUS_GEOCODER_URL, params={"address": addr, "benchmark": "Public_AR_Current", "format": "json"})
@@ -123,7 +138,7 @@ def geocode_oneline(addr: str) -> Tuple[float, float, dict]:
     county = _title((ad.get("county") or "").replace(" County", ""))
     return lat, lon, {"town": town, "county": county, "geocoder": "nominatim"}
 
-# ---------- OPENSTATES ----------
+# ---------------- OPENSTATES ----------------
 def openstates_people_geo(lat: float, lon: float) -> List[dict]:
     headers = {"X-API-KEY": OPENSTATES_API_KEY} if OPENSTATES_API_KEY else {}
     r = _http_get(OS_PEOPLE_GEO, params={"lat": lat, "lng": lon}, headers=headers)
@@ -157,7 +172,7 @@ def _pick_house_members_from_people_geo(people: List[dict]) -> List[dict]:
         })
     return out
 
-# ---------- ROUTES ----------
+# ---------------- ROUTES ----------------
 @app.get("/health")
 def health():
     base_rows = _read_csv_url(FLOTERIAL_BASE_CSV_URL)
@@ -221,7 +236,7 @@ def lookup_legislators():
             county = next(iter(poss))
     overlay_labels = sorted(list(town_map.get(_key(town, county), set())))
 
-    # 4) If people.geo worked, return
+    # 4) If people.geo worked, return those (includes base + floterial)
     if house_from_geo:
         return jsonify({
             "success": True,
@@ -231,7 +246,7 @@ def lookup_legislators():
             "stateRepresentatives": house_from_geo,
         })
 
-    # 5) Fallback: query /people (parse dict-with-results)
+    # 5) Fallback: query /people (parse dict-with-results, use expanded labels)
     reps: List[dict] = []
     try:
         districts_to_try = set(overlay_labels)
@@ -290,7 +305,7 @@ def lookup_legislators():
 def root():
     return jsonify({"ok": True, "see": "/health"})
 
-# ---------- MAIN ----------
+# ---------------- MAIN ----------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
