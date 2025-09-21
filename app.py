@@ -6,7 +6,7 @@ import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-# ---------------- Env ----------------
+# ---------- ENV ----------
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -27,11 +27,11 @@ OS_PEOPLE_GEO = f"{OS_ROOT}/people.geo"
 CENSUS_GEOCODER_URL = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
 NOMINATIM_URL       = "https://nominatim.openstreetmap.org/search"
 
-# ---------------- App ----------------
+# ---------- APP ----------
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": ALLOWED_ORIGINS.split(",") if ALLOWED_ORIGINS else ["*"]}})
 
-# ---------------- Helpers ----------------
+# ---------- HELPERS ----------
 def _http_get(url: str, params: dict | None = None, headers: dict | None = None, timeout: int = 18):
     r = requests.get(url, params=params or {}, headers=headers or {}, timeout=timeout)
     app.logger.info(f"GET {url} {r.status_code} params={params}")
@@ -53,7 +53,7 @@ def _norm_district(label: str) -> str:
         return (label or "").strip()
     return f"{m.group(1).title()} {int(m.group(2))}"
 
-# ---------------- CSV load (cached) ----------------
+# ---------- CSV LOAD (CACHED) ----------
 _csv_cache: Dict[str, Tuple[float, List[dict]]] = {}
 
 def _read_csv_url(url: str) -> List[dict]:
@@ -90,15 +90,15 @@ def load_floterial_maps() -> Tuple[Dict[str, set], Dict[Tuple[str, str], set]]:
         town   = _title(r.get("town", ""))
         county = _title((r.get("county", "").replace(" County", "")).strip())
         fd     = (r.get("floterial_district") or r.get("district") or "").strip()
-        # if fd is like "Me 30", rebuild from county + number
+        # If fd looks abbreviated like "Me 30", rebuild "<County> <num>"
         m = re.search(r"(\d+)$", fd)
-        if county and m and (len(fd.split()[0]) < 4):
+        if county and m and (len((fd.split() or [''])[0]) < 4):
             fd = f"{county} {int(m.group(1))}"
         if town and county and fd:
             town_map.setdefault(_key(town, county), set()).add(_norm_district(fd))
     return base_map, town_map
 
-# ---------------- Geocoding ----------------
+# ---------- GEOCODING ----------
 def geocode_oneline(addr: str) -> Tuple[float, float, dict]:
     try:
         r = _http_get(CENSUS_GEOCODER_URL, params={"address": addr, "benchmark": "Public_AR_Current", "format": "json"})
@@ -123,13 +123,13 @@ def geocode_oneline(addr: str) -> Tuple[float, float, dict]:
     county = _title((ad.get("county") or "").replace(" County", ""))
     return lat, lon, {"town": town, "county": county, "geocoder": "nominatim"}
 
-# ---------------- OpenStates ----------------
+# ---------- OPENSTATES ----------
 def openstates_people_geo(lat: float, lon: float) -> List[dict]:
     headers = {"X-API-KEY": OPENSTATES_API_KEY} if OPENSTATES_API_KEY else {}
     r = _http_get(OS_PEOPLE_GEO, params={"lat": lat, "lng": lon}, headers=headers)
     j = r.json()
     if isinstance(j, dict) and "results" in j:
-        return j.get("results") or []
+        return j["results"] or []
     if isinstance(j, list):
         return j
     return []
@@ -139,7 +139,7 @@ def _pick_house_members_from_people_geo(people: List[dict]) -> List[dict]:
         if isinstance(j, dict): return (j.get("name") or "").lower()
         return (j or "").lower()
     def is_lower_nh(role: dict) -> bool:
-        lower = role.get("org_classification") == "lower" or role.get("chamber") == "lower"
+        lower = (role.get("org_classification") == "lower") or (role.get("chamber") == "lower")
         return lower and ("new hampshire" in j_name(role.get("jurisdiction")))
     out: List[dict] = []
     for p in people or []:
@@ -157,7 +157,7 @@ def _pick_house_members_from_people_geo(people: List[dict]) -> List[dict]:
         })
     return out
 
-# ---------------- Routes ----------------
+# ---------- ROUTES ----------
 @app.get("/health")
 def health():
     base_rows = _read_csv_url(FLOTERIAL_BASE_CSV_URL)
@@ -189,7 +189,7 @@ def debug_floterials():
 def debug_row():
     qtown = _title(request.args.get("town", ""))
     town_rows = _read_csv_url(FLOTERIAL_TOWN_CSV_URL)
-    hits = [r for r in town_rows if _key(r.get("town",""), r.get("county","")) == _key(qtown, r.get("county","")) or _title(r.get("town",""))==qtown]
+    hits = [r for r in town_rows if _title(r.get("town","")) == qtown]
     return jsonify({"town": qtown, "rows": hits[:10], "count": len(hits)})
 
 @app.get("/api/lookup-legislators")
@@ -216,7 +216,6 @@ def lookup_legislators():
     # 3) Overlays + county inference
     base_map, town_map = load_floterial_maps()
     if (not county) and town:
-        # infer county from CSV keys for this town
         poss = {c for (t, c) in town_map.keys() if t == _title(_deaccent(town))}
         if len(poss) == 1:
             county = next(iter(poss))
@@ -232,7 +231,7 @@ def lookup_legislators():
             "stateRepresentatives": house_from_geo,
         })
 
-    # 5) Fallback against /people (handle dict-with-results)
+    # 5) Fallback: query /people (parse dict-with-results)
     reps: List[dict] = []
     try:
         districts_to_try = set(overlay_labels)
@@ -240,6 +239,7 @@ def lookup_legislators():
             if fset & districts_to_try:
                 districts_to_try.add(b)
         headers = {"X-API-KEY": OPENSTATES_API_KEY} if OPENSTATES_API_KEY else {}
+
         def _fetch(params: dict) -> Iterable[dict]:
             try:
                 r = _http_get(OS_PEOPLE, params=params, headers=headers)
@@ -249,9 +249,11 @@ def lookup_legislators():
                 return j
             except Exception:
                 return []
+
         seen = set()
         for d in districts_to_try:
-            if not d: continue
+            if not d: 
+                continue
             variants = [
                 {"jurisdiction": "New Hampshire", "chamber": "lower", "district": d},
                 {"state": "NH", "chamber": "lower", "district": d},
@@ -262,7 +264,8 @@ def lookup_legislators():
             for params in variants:
                 for p in _fetch(params):
                     k = p.get("id") or (p.get("name"), p.get("email"))
-                    if k in seen: continue
+                    if k in seen: 
+                        continue
                     seen.add(k)
                     reps.append({
                         "name": p.get("name"),
@@ -287,6 +290,7 @@ def lookup_legislators():
 def root():
     return jsonify({"ok": True, "see": "/health"})
 
+# ---------- MAIN ----------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
