@@ -1,260 +1,132 @@
 town,county,floterial_district
-Acworth,Acworth,Su 8
-Albany,Albany,
-Alexandria,Alexandria,Gr 18
-Allenstown,Allenstown,Me 27
-Alstead,Alstead,Ch 16
-Alton,Alton,
-Amherst,Amherst,Hi 37
-Andover,Andover,Me 26
-Antrim,Antrim,
-Ashland,Ashland,
-Atkinson,Atkinson,
-Atkinson & Gilmanton,Atkinson & Gilmanton,
-Auburn,Auburn,Ro 31
-Barnstead,Barnstead,
-Barrington,Barrington,St 18
-Bartlett,Bartlett,
-Bath,Bath,
-Beans Grant,Beans Grant,
-Beans Purchase,Beans Purchase,
-Bedford,Bedford,
-Belmont,Belmont,Be 8
-Bennington,Bennington,
-Benton,Benton,
-Berlin,Berlin,Co 7
-Bethlehem,Bethlehem,
-Boscawen,Boscawen,Me 26
-Bow,Bow,
-Bradford,Bradford,
-Brentwood,Brentwood,Ro 32
-Bridgewater,Bridgewater,Gr 18
-Bristol,Bristol,Gr 18
-Brookfield,Brookfield,Ca 8
-Brookline,Brookline,Hi 45
-Cambridge,Cambridge,
-Campton,Campton,
-Canaan,Canaan,Gr 18
-Candia,Candia,Ro 31
-Canterbury,Canterbury,Me 26
-Carroll,Carroll,Co 7
-Center Harbor,Center Harbor,
-Chandlers Purchase,Chandlers Purchase,
-Charlestown,Charlestown,Su 7
-Chatham,Chatham,
-Chester,Chester,Ro 31
-Chesterfield,Chesterfield,Ch 15
-Chichester,Chichester,
-Claremont,Claremont,Su 8
-Clarksville,Clarksville,
-Colebrook,Colebrook,
-Columbia,Columbia,
-Concord,Concord,Me 30
-Conway,Conway,
-Cornish,Cornish,Su 7
-Crawfords Purchase,Crawfords Purchase,
-Croydon,Croydon,Su 8
-Cutts Grant,Cutts Grant,
-Dalton,Dalton,
-Danbury,Danbury,Me 26
-Danville,Danville,Ro 32
-Deerfield,Deerfield,Ro 31
-Deering,Deering,
-Derry,Derry,
-Dixs Grant,Dixs Grant,
-Dixville,Dixville,
-Dorchester,Dorchester,Gr 18
-Dover,Dover,St 21
-Dublin,Dublin,Ch 18
-Dummer,Dummer,
-Dunbarton,Dunbarton,Me 27
-Durham,Durham,St 20
-East Kingston,East Kingston,Ro 34
-Easton,Easton,
-Eaton,Eaton,Ca 8
-Effingham,Effingham,Ca 8
-Ellsworth,Ellsworth,
-Enfield,Enfield,Gr 18
-Epping,Epping,
-Epsom,Epsom,Me 27
-Errol,Errol,
-Ervings Location,Ervings Location,
-Exeter,Exeter,Ro 33
-Farmington,Farmington,
-Fitzwilliam,Fitzwilliam,Ch 17
-Francestown,Francestown,
-Franconia,Franconia,
-Franklin,Franklin,Me 25
-Freedom,Freedom,Ca 8
-Fremont,Fremont,Ro 32
-Gilford,Gilford,
-Gilmanton,Gilmanton,
-Gilsum,Gilsum,Ch 16
-Goffstown,Goffstown,Hi 44
-Gorham,Gorham,
-Goshen,Goshen,Su 8
+Acworth,Sullivan,Su 8
+Alexandria,Grafton,Gr 18
+Allenstown,Merrimack,Me 27
+Alstead,Cheshire,Ch 16
+Amherst,Hillsborough,Hi 37
+Andover,Merrimack,Me 26
+Auburn,Rockingham,Ro 31
+Barrington,Strafford,St 18
+Belmont,Belknap,Be 8
+Berlin,Coos,Co 7
+Boscawen,Merrimack,Me 26
+Brentwood,Rockingham,Ro 32
+Bridgewater,Grafton,Gr 18
+Bristol,Grafton,Gr 18
+Brookfield,Carroll,Ca 8
+Brookline,Hillsborough,Hi 45
+Canaan,Grafton,Gr 18
+Candia,Rockingham,Ro 31
+Canterbury,Merrimack,Me 26
+Carroll,Coos,Co 7
+Charlestown,Sullivan,Su 7
+Chester,Rockingham,Ro 31
+Chesterfield,Cheshire,Ch 15
+Claremont,Sullivan,Su 8
+Concord,Merrimack,Me 30
+Cornish,Sullivan,Su 7
+Croydon,Sullivan,Su 8
+Danbury,Merrimack,Me 26
+Danville,Rockingham,Ro 32
+Deerfield,Rockingham,Ro 31
+Dorchester,Grafton,Gr 18
+Dover,Strafford,St 21
+Dublin,Cheshire,Ch 18
+Dunbarton,Merrimack,Me 27
+Durham,Strafford,St 20
+East Kingston,Rockingham,Ro 34
+Eaton,Carroll,Ca 8
+Effingham,Carroll,Ca 8
+Enfield,Grafton,Gr 18
+Epsom,Merrimack,Me 27
+Exeter,Rockingham,Ro 33
+Fitzwilliam,Cheshire,Ch 17
+Franklin,Merrimack,Me 25
+Freedom,Carroll,Ca 8
+Fremont,Rockingham,Ro 32
+Gilsum,Cheshire,Ch 16
+Goffstown,Hillsborough,Hi 44
+Goshen,Sullivan,Su 8
 Grafton,Grafton,Gr 18
-Grantham,Grantham,
-Greenfield,Greenfield,
-Greenland,Greenland,Ro 38
-Greens Grant,Greens Grant,
-Greenville,Greenville,Hi 45
-Groton,Groton,Gr 18
-Hadleys Purchase,Hadleys Purchase,
-Hales Location,Hales Location,
-Hampstead,Hampstead,Ro 34
-Hampton,Hampton,Ro 40
-Hampton Falls,Hampton Falls,Ro 36
-Hancock,Hancock,
-Hanover,Hanover,
-Harrisville,Harrisville,Ch 16
-Hart'S Location,Hart'S Location,
-Haverhill,Haverhill,
-Hebron,Hebron,Gr 18
-Henniker,Henniker,
-Hill,Hill,Me 26
-Hillsborough,Hillsborough,
-Hinsdale,Hinsdale,Ch 15
-Holderness,Holderness,
-Hollis,Hollis,Hi 45
-Hooksett,Hooksett,Me 27
-Hopkinton,Hopkinton,
-Hudson,Hudson,Hi 38
-Jackson,Jackson,
-Jaffrey,Jaffrey,Ch 18
-Jefferson,Jefferson,Co 7
-Keene,Keene,Ch 15
-Kensington,Kensington,Ro 36
-Kilkenny,Kilkenny,Co 7
+Greenland,Rockingham,Ro 38
+Greenville,Hillsborough,Hi 45
+Groton,Grafton,Gr 18
+Hampstead,Rockingham,Ro 34
+Hampton,Rockingham,Ro 40
+Hampton Falls,Rockingham,Ro 36
+Harrisville,Cheshire,Ch 16
+Hebron,Grafton,Gr 18
+Hill,Merrimack,Me 26
+Hinsdale,Cheshire,Ch 15
+Hollis,Hillsborough,Hi 45
+Hooksett,Merrimack,Me 27
+Hudson,Hillsborough,Hi 38
+Jaffrey,Cheshire,Ch 18
+Jefferson,Coos,Co 7
+Keene,Cheshire,Ch 15
+Kensington,Rockingham,Ro 36
+Kilkenny,Coos,Co 7
 Kingston,Kingston,Ro 34
-Laconia,Laconia,
-Lancaster,Lancaster,
-Landaff,Landaff,
-Langdon,Langdon,Su 8
-Lebanon,Lebanon,Gr 17
-Lee,Lee,St 20
-Lempster,Lempster,Su 8
-Lincoln,Lincoln,
-Lisbon,Lisbon,
-Litchfield,Litchfield,Hi 38
-Littleton,Littleton,
-Londonderry,Londonderry,Ro 35
-Loudon,Loudon,Me 26
-Low & Burbanks,Low & Burbanks,
-Lyman,Lyman,
-Lyme,Lyme,
-Lyndeborough,Lyndeborough,
-Madbury,Madbury,St 20
-Madison,Madison,Ca 8
-Manchester,Manchester,Hi 41
-Marlborough,Marlborough,Ch 16
-Marlow,Marlow,Ch 16
-Martins Location,Martins Location,
-Mason,Mason,Hi 45
-Meredith,Meredith,
-Merrimack,Merrimack,
-Middleton,Middleton,St 18
-Milan,Milan,
-Milford,Milford,Hi 37
-Millsfield,Millsfield,
-Milton,Milton,
-Monroe,Monroe,
-Mont Vernon,Mont Vernon,
-Moultonborough,Moultonborough,Ca 8
-Nashua,Nashua,
-Nelson,Nelson,Ch 16
-New Boston,New Boston,
-New Castle,New Castle,Ro 37
-New Durham,New Durham,St 18
-New Hampton,New Hampton,
-New Ipswich,New Ipswich,
-New London,New London,
-Newbury,Newbury,
-Newfields,Newfields,Ro 33
-Newington,Newington,Ro 37
-Newmarket,Newmarket,Ro 33
-Newport,Newport,Su 7
-Newton,Newton,Ro 36
-North Hampton,North Hampton,Ro 38
-Northfield,Northfield,Me 25
-Northumberland,Northumberland,
-Northwood,Northwood,
-Nottingham,Nottingham,
-Odell,Odell,
-Orange,Orange,Gr 18
-Orford,Orford,
-Ossipee,Ossipee,Ca 7
-Pelham,Pelham,
-Pembroke,Pembroke,
-Peterborough,Peterborough,
-Piermont,Piermont,
-Pinkham'S Grant,Pinkham'S Grant,
-Pittsburg,Pittsburg,
-Pittsfield,Pittsfield,
-Plainfield,Plainfield,Su 7
-Plaistow,Plaistow,Ro 36
-Plymouth,Plymouth,
-Portsmouth,Portsmouth,Ro 39
-Randolph,Randolph,
-Raymond,Raymond,
-Richmond,Richmond,Ch 17
-Rindge,Rindge,Ch 18
-Rochester,Rochester,St 19
-Rollinsford,Rollinsford,
-Roxbury,Roxbury,Ch 16
-Rumney,Rumney,
-Rye,Rye,Ro 38
-Salem,Salem,
-Salisbury,Salisbury,Me 26
-Sanbornton,Sanbornton,Be 8
-Sandown,Sandown,
-Sandwich,Sandwich,
-Sargents Purchase,Sargents Purchase,
-Seabrook,Seabrook,Ro 40
-Second College,Second College,
-Sharon,Sharon,
-Shelburne,Shelburne,
-Somersworth,Somersworth,
-South Hampton,South Hampton,Ro 36
-Springfield,Springfield,Su 8
-Stark,Stark,
-Stewartstown,Stewartstown,
-Stoddard,Stoddard,Ch 16
+Langdon,Sullivan,Su 8
+Lebanon,Grafton,Gr 17
+Lee,Strafford,St 20
+Lempster,Sullivan,Su 8
+Litchfield,Hillsborough,Hi 38
+Londonderry,Rockingham,Ro 35
+Loudon,Merrimack,Me 26
+Madbury,Strafford,St 20
+Madison,Carroll,Ca 8
+Manchester,Hillsborough,Hi 41
+Marlborough,Cheshire,Ch 16
+Marlow,Cheshire,Ch 16
+Mason,Hillsborough,Hi 45
+Middleton,Strafford,St 18
+Milford,Hillsborough,Hi 37
+Moultonborough,Carroll,Ca 8
+Nelson,Cheshire,Ch 16
+New Castle,Rockingham,Ro 37
+New Durham,Strafford,St 18
+Newfields,Rockingham,Ro 33
+Newington,Rockingham,Ro 37
+Newmarket,Rockingham,Ro 33
+Newport,Sullivan,Su 7
+Newton,Rockingham,Ro 36
+North Hampton,Rockingham,Ro 38
+Northfield,Merrimack,Me 25
+Orange,Grafton,Gr 18
+Ossipee,Carroll,Ca 7
+Plainfield,Sullivan,Su 7
+Plaistow,Rockingham,Ro 36
+Portsmouth,Rockingham,Ro 39
+Richmond,Cheshire,Ch 17
+Rindge,Cheshire,Ch 18
+Rochester,Strafford,St 19
+Roxbury,Cheshire,Ch 16
+Rye,Rockingham,Ro 38
+Salisbury,Merrimack,Me 26
+Sanbornton,Belknap,Be 8
+Seabrook,Rockingham,Ro 40
+South Hampton,Rockingham,Ro 36
+Springfield,Sullivan,Su 8
+Stoddard,Cheshire,Ch 16
 Strafford,Strafford,St 18
-Stratford,Stratford,
-Stratham,Stratham,Ro 33
-Success,Success,
-Sugar Hill,Sugar Hill,
-Sullivan,Sullivan,Ch 16
-Sunapee,Sunapee,Su 8
-Surry,Surry,Ch 15
-Sutton,Sutton,
-Swanzey,Swanzey,Ch 17
-Tamworth,Tamworth,Ca 8
-Temple,Temple,
-Thompson & Meserve,Thompson & Meserve,
-Thornton,Thornton,
-Tilton,Tilton,Be 8
-Troy,Troy,Ch 17
-Tuftonboro,Tuftonboro,Ca 7
-Unity,Unity,Su 7
-Unorganized Territory,Unorganized Territory,
-Wakefield,Wakefield,Ca 8
-Walpole,Walpole,Ch 15
-Warner,Warner,
-Warren,Warren,
-Washington,Washington,Su 8
-Waterville Valley,Waterville Valley,
-Weare,Weare,Hi 44
-Webster,Webster,Me 26
-Wentworth,Wentworth,
-Wentworths Location,Wentworths Location,
-Westmoreland,Westmoreland,Ch 15
-Whitefield,Whitefield,Co 7
-Wilmot,Wilmot,
-Wilton,Wilton,
-Winchester,Winchester,Ch 17
-Windham,Windham,Ro 35
-Windsor,Windsor,
-Wolfeboro,Wolfeboro,Ca 7
-Woodstock,Woodstock,
+Stratham,Rockingham,Ro 33
+Sullivan,Cheshire,Ch 16
+Sunapee,Sullivan,Su 8
+Surry,Cheshire,Ch 15
+Swanzey,Cheshire,Ch 17
+Tamworth,Carroll,Ca 8
+Tilton,Belknap,Be 8
+Troy,Cheshire,Ch 17
+Tuftonboro,Carroll,Ca 7
+Unity,Sullivan,Su 7
+Wakefield,Carroll,Ca 8
+Walpole,Cheshire,Ch 15
+Washington,Sullivan,Su 8
+Weare,Hillsborough,Hi 44
+Webster,Merrimack,Me 26
+Westmoreland,Cheshire,Ch 15
+Whitefield,Coos,Co 7
+Winchester,Cheshire,Ch 17
+Windham,Rockingham,Ro 35
+Wolfeboro,Carroll,Ca 7
