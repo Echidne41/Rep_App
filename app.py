@@ -168,22 +168,15 @@ def census_sldl_from_coords(lat: float, lon: float) -> Optional[str]:
     try:
         r = _http_get(
             "https://geocoding.geo.census.gov/geocoder/geographies/coordinates",
-            params={
-                "x": lon, "y": lat,
-                "benchmark": "Public_AR_Current",
-                "vintage": "Current_Current",
-                "format": "json",
-            },
+            params={"x": lon, "y": lat, "benchmark": "Public_AR_Current",
+                    "vintage": "Current_Current", "format": "json"},
         )
         j = r.json() or {}
         geogs = ((j.get("result") or {}).get("geographies") or {})
-        # Try both common labels
-        for key in (
-            "State Legislative Districts - Lower",
-            "State Legislative Districts - Lower Chamber",
-        ):
+        for key in ("State Legislative Districts - Lower",
+                    "State Legislative Districts - Lower Chamber"):
             arr = geogs.get(key) or []
-            if not arr:
+            if not arr: 
                 continue
             rec = arr[0] or {}
             base = str(rec.get("BASENAME") or "").strip()
@@ -196,6 +189,7 @@ def census_sldl_from_coords(lat: float, lon: float) -> Optional[str]:
     except Exception as e:
         app.logger.warning(f"census_sldl_from_coords failed: {type(e).__name__}: {e}")
     return None
+
 
 
 # ---------------- OPENSTATES ----------------
@@ -400,6 +394,7 @@ def root():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
 
