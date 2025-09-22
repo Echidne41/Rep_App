@@ -94,6 +94,29 @@ def health():
 # =========================
 # HELPERS
 # =========================
+
+# --- DEBUG HELPERS ---
+def _peek_csv_headers_and_rows(url: str, n: int = 5):
+    if not url:
+        return {"url": url, "note": "empty url"}
+    try:
+        txt = _read_text_from_url(url)
+        # show the raw first line too (catches hidden chars)
+        raw_first_line = txt.splitlines()[0] if txt else ""
+        rdr = csv.DictReader(io.StringIO(txt))
+        rows = []
+        for i, r in enumerate(rdr):
+            if i >= n: break
+            rows.append(r)
+        return {
+            "url": url,
+            "fieldnames": rdr.fieldnames,
+            "raw_first_line": raw_first_line,
+            "sample_rows": rows
+        }
+    except Exception as e:
+        return {"url": url, "error": f"{type(e).__name__}: {e}"}
+
 def _read_text_from_url(url: str) -> str:
     if not url:
         return ""
@@ -573,11 +596,17 @@ def api_lookup_legislators():
 def debug_floterials():
     by_base, by_town = _load_floterials_cached()
     return jsonify({
-        "by_base_count": sum(len(v) for v in by_base.values()),
-        "by_town_count": sum(len(v) for v in by_town.values()),
-        "have_base_keys_sample": sorted(list(by_base.keys()))[:10],
-        "have_town_keys_sample": sorted([f"{t},{c}" for (t,c) in by_town.keys()])[:10]
+        "base_to_floterial_count": sum(len(v) for v in by_base.values()),
+        "town_to_floterial_count": sum(len(v) for v in by_town.values()),
+        "samples": {
+            "base": sorted(list(by_base.keys()))[:10],
+            "town": [
+                {"town": t, "county": c, "floterials": sorted(list(v))}
+                for (t,c), v in list(by_town.items())[:5]
+            ],
+        }
     })
+
 
 @app.get("/debug/district")
 def debug_district():
@@ -590,4 +619,5 @@ def debug_district():
 # =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=os.getenv("FLASK_DEBUG","0") == "1")
+
 
