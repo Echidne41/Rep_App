@@ -492,9 +492,28 @@ def _nominatim_reverse(lat: float, lon: float):
         return _norm_town(town), county.title()
     except Exception:
         return "", ""
+# Census SLDL → "Sullivan 2" style
+def _census_sldl_from_coords(lat: float, lon: float) -> str | None:
+    try:
+        url = "https://geocoding.geo.census.gov/geocoder/geographies/coordinates"
+        params = {
+            "x": lon, "y": lat, "benchmark": "Public_AR_Census2020",
+            "vintage": "Current", "format": "json"
+        }
+        r = requests.get(url, params=params, timeout=15)
+        r.raise_for_status()
+        g = ((r.json() or {}).get("result") or {}).get("geographies") or {}
+        rows = g.get("State Legislative Districts - Lower") or g.get("State Legislative Districts - Lower (SLDL)") or []
+        if not rows:
+            return None
+        row = rows[0]
+        # Try BASENAME first (often just "Sullivan 2"), then NAME
+        label = row.get("BASENAME") or row.get("NAME") or ""
+        return _norm_district_label(label)
+    except Exception:
+        return None
 
 def _overlay_district_labels(lat: float, lon: float, openstates_labels, addr_text: str | None = None):
-    """Union of labels from OpenStates + base→floterials + town→floterials + floterial→base (inversion)."""
     by_base, by_town = _load_floterials_cached()
 
     current = {_norm_district_label(x) for x in openstates_labels if x}
@@ -517,13 +536,19 @@ def _overlay_district_labels(lat: float, lon: float, openstates_labels, addr_tex
         for f in by_town.get((town, county), set()):
             overlay.add(_norm_district_label(f))
 
-    # 3) floterial -> base (run AFTER town adds)
-    norm_all_flos = {x for x in overlay if re.search(r"^[A-Za-z]+\s+\d+$", x)}
-    for b, fset in by_base.items():
-        if norm_all_flos & {_norm_district_label(x) for x in (fset or set())}:
-            overlay.add(_norm_district_label(b))
+    # 3) floterial -> base, **constrained** by Census SLDL if available
+    preferred_base = _census_sldl_from_coords(lat, lon)
+    if preferred_base:
+        overlay.add(_norm_district_label(preferred_base))
+    else:
+        # fallback: previous broad inversion
+        norm_all_flos = {x for x in overlay if re.search(r"^[A-Za-z]+\s+\d+$", x)}
+        for b, fset in by_base.items():
+            if norm_all_flos & {_norm_district_label(x) for x in (fset or set())}:
+                overlay.add(_norm_district_label(b))
 
     return overlay
+
 
 # =========================
 # LOOKUP
@@ -652,3 +677,4 @@ def version():
 # =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=os.getenv("FLASK_DEBUG","0") == "1")
+
