@@ -349,6 +349,12 @@ def lookup_legislators():
     for b, fset in (base_map or {}).items():
         if fset & districts_to_try:
             districts_to_try.add(_norm_district(b))
+    # If we have floterials but no base yet, pull base(s) from CSV inversion
+    if overlay_labels:
+        flos = { _norm_district(d) for d in overlay_labels }
+        for b, fset in (base_map or {}).items():
+            if fset & flos:
+                districts_to_try.add(_norm_district(b))
 
     # 6) Query OpenStates /people for each district; merge with people.geo; dedupe
     reps: List[dict] = house_from_geo[:]
@@ -391,4 +397,5 @@ def root():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
