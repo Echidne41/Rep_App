@@ -240,10 +240,32 @@ def _norm_town(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip()).title()
 
 def _load_floterial_csv(url: str):
-    if not url: return []
+    """Load CSV with BOM/header normalization so 'base_district' is always found."""
+    if not url:
+        return []
     txt = _read_text_from_url(url)
-    rdr = csv.DictReader(io.StringIO(txt))
-    return list(rdr)
+    # strip UTF-8 BOM if present
+    if txt.startswith("\ufeff"):
+        txt = txt.lstrip("\ufeff")
+
+    f = io.StringIO(txt)
+    rdr = csv.reader(f)
+    rows = list(rdr)
+    if not rows:
+        return []
+
+    def norm(h: str) -> str:
+        return re.sub(r"\s+", "_", (h or "").strip().strip('"').strip("'").lower().lstrip("\ufeff"))
+
+    headers = [norm(h) for h in rows[0]]
+    out = []
+    for r in rows[1:]:
+        d = {}
+        for i, h in enumerate(headers):
+            d[h] = (r[i].strip() if i < len(r) else "")
+        out.append(d)
+    return out
+
 
 def _load_floterials_cached():
     now = time.time()
@@ -568,3 +590,4 @@ def debug_district():
 # =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=os.getenv("FLASK_DEBUG","0") == "1")
+
