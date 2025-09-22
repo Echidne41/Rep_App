@@ -229,24 +229,42 @@ def _census_geocode(addr: str):
     return lat, lon
 
 def _census_geographies(lat: float, lon: float):
-    """Return (base_sldl, town_name, county_name) from Census geographies."""
-    params = {"x": lon, "y": lat, "benchmark": "Public_AR_Census2020", "vintage": "Current", "format": "json"}
-    r = requests.get(CENSUS_GEOG, params=params, timeout=20)
-    r.raise_for_status()
-    g = ((r.json() or {}).get("result") or {}).get("geographies") or {}
+    """Return (base_sldl, town_name, county_name) from Census geographies with robust fallbacks."""
+    url = "https://geocoding.geo.census.gov/geocoder/geographies/coordinates"
 
-    # Base district (SLDL)
-    rows = g.get("State Legislative Districts - Lower") or g.get("State Legislative Districts - Lower (SLDL)") or []
-    base = _norm_district_label((rows[0].get("BASENAME") or rows[0].get("NAME") or "")) if rows else None
+    def _try(params):
+        r = requests.get(url, params=params, timeout=20)
+        r.raise_for_status()
+        g = ((r.json() or {}).get("result") or {}).get("geographies") or {}
+        # SLDL rows can be under either key
+        sldl = g.get("State Legislative Districts - Lower") or g.get("State Legislative Districts - Lower (SLDL)") or []
+        mcd  = g.get("County Subdivisions") or g.get("County Subdivisions (MCD)") or []
+        co   = g.get("Counties") or []
+        # Base district
+        base = None
+        if sldl:
+            base = _norm_district_label((sldl[0].get("BASENAME") or sldl[0].get("NAME") or ""))
+        # Town (MCD) and County
+        town   = _norm_town(mcd[0].get("NAME") or "") if mcd else ""
+        county = (co[0].get("NAME") or "").replace(" County","").strip().title() if co else ""
+        return base, town, county
 
-    # County Subdivision (NH towns are MCDs)
-    mcd = g.get("County Subdivisions") or g.get("County Subdivisions (MCD)") or []
-    town = _norm_town(mcd[0].get("NAME") or "") if mcd else ""
-    # County
-    co = g.get("Counties") or []
-    county = (co[0].get("NAME") or "").replace(" County","").strip().title() if co else ""
+    # Try the correct benchmark for this endpoint first.
+    tries = [
+        {"x": lon, "y": lat, "benchmark": "Public_AR_Current", "vintage": "Current", "format": "json"},
+        {"x": lon, "y": lat, "benchmark": "4",                  "vintage": "Current", "format": "json"},   # numeric id
+        {"x": lon, "y": lat, "benchmark": "Public_AR_Census2020","vintage": "Census2020_Current", "format": "json"},
+    ]
+    last_err = None
+    for p in tries:
+        try:
+            return _try(p)
+        except Exception as e:
+            last_err = e
+            continue
+    # If everything fails, surface a clear error
+    raise requests.HTTPError(f"Census geographies failed after fallbacks: {last_err}")
 
-    return base, town, county
 
 # =========================
 # LABEL COMPUTATION (deterministic)
@@ -465,3 +483,4 @@ def health():
 # =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=os.getenv("FLASK_DEBUG","0") == "1")
+
