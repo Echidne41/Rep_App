@@ -346,9 +346,12 @@ def lookup_legislators():
         districts_to_try.add(_norm_district(sldl_label))    # 'Sullivan 2', etc.
 
     # link base <- floterial via CSV
+    # ensure base(s) from CSV whenever overlays exist
+    flos = { _norm_district(d) for d in overlay_labels if d }
     for b, fset in (base_map or {}).items():
-        if fset & districts_to_try:
+        if { _norm_district(x) for x in (fset or set()) } & flos:
             districts_to_try.add(_norm_district(b))
+
     # If we have floterials but no base yet, pull base(s) from CSV inversion
     if overlay_labels:
         flos = { _norm_district(d) for d in overlay_labels }
@@ -397,5 +400,6 @@ def root():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
