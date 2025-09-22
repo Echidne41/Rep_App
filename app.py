@@ -82,50 +82,8 @@ FLOTERIAL_BASE_CSV_URL = os.getenv("FLOTERIAL_BASE_CSV_URL", "").strip()
 FLOTERIAL_TOWN_CSV_URL = os.getenv("FLOTERIAL_TOWN_CSV_URL", "").strip()
 
 # =========================
-# HEALTH (verbose)
-# =========================
-@app.get("/health")
-def health():
-    by_base, by_town = _load_floterials_cached()
-    def _raw_first(url):
-        try:
-            t = _read_text_from_url(url)
-            return t.splitlines()[0] if t else ""
-        except Exception as e:
-            return f"ERR:{type(e).__name__}"
-    return jsonify({
-        "ok": True,
-        "has_openstates_key": bool(OPENSTATES_API_KEY),
-        "votes_csv_url_set": bool(VOTES_CSV_URL),
-        "floterial_base_csv_set": bool(FLOTERIAL_BASE_CSV_URL),
-        "floterial_town_csv_set": bool(FLOTERIAL_TOWN_CSV_URL),
-        "base_to_floterial_count": sum(len(v) for v in by_base.values()),
-        "town_to_floterial_count": sum(len(v) for v in by_town.values()),
-        "base_keys_sample": sorted(list(by_base.keys()))[:5],
-        "town_keys_sample": sorted([f"{t},{c}" for (t,c) in by_town.keys()])[:5],
-        "base_csv_first_line": _raw_first(FLOTERIAL_BASE_CSV_URL),
-        "town_csv_first_line": _raw_first(FLOTERIAL_TOWN_CSV_URL),
-        "commit": os.getenv("RENDER_GIT_COMMIT","local")
-    })
-
-# =========================
 # HELPERS
 # =========================
-
-def _census_sldl_from_coords(lat: float, lon: float) -> str | None:
-    try:
-        url = "https://geocoding.geo.census.gov/geocoder/geographies/coordinates"
-        params = {"x": lon, "y": lat, "benchmark": "Public_AR_Census2020", "vintage": "Current", "format": "json"}
-        r = requests.get(url, params=params, timeout=15)
-        r.raise_for_status()
-        g = ((r.json() or {}).get("result") or {}).get("geographies") or {}
-        rows = g.get("State Legislative Districts - Lower") or g.get("State Legislative Districts - Lower (SLDL)") or []
-        if not rows: return None
-        label = rows[0].get("BASENAME") or rows[0].get("NAME") or ""
-        return _norm_district_label(label)
-    except Exception:
-        return None
-
 def _read_text_from_url(url: str) -> str:
     if not url:
         return ""
@@ -208,11 +166,8 @@ def _build_vote_map(rows):
             val = str(r.get("vote", ""))
             name_key = _normkey(r.get("name", ""))
             dist_key = _normkey(r.get("district", ""))
-
-            if pid:
-                out.setdefault(pid, {})[bill_label] = val
-            if name_key:
-                out.setdefault(f"name:{name_key}", {})[bill_label] = val
+            if pid: out.setdefault(pid, {})[bill_label] = val
+            if name_key: out.setdefault(f"name:{name_key}", {})[bill_label] = val
             out.setdefault(f"nd:{name_key}|{dist_key}", {})[bill_label] = val
         return out
 
@@ -222,16 +177,13 @@ def _build_vote_map(rows):
         row = {}
         for k, v in r.items():
             lk = k.lower()
-            if lk in ("openstates_person_id","person_id","id","name","district","party","bill","vote"):
-                continue
+            if lk in ("openstates_person_id","person_id","id","name","district","party","bill","vote"): continue
             row[k] = str(v or "")
         name_key = _normkey(r.get("name", ""))
         dist_key = _normkey(r.get("district", ""))
-
         if pid: out[pid] = row
         if name_key: out[f"name:{name_key}"] = row
         out[f"nd:{name_key}|{dist_key}"] = row
-
     return out
 
 @app.get("/api/vote-map")
@@ -239,8 +191,7 @@ def api_vote_map():
     rows, cols = _load_votes_rows_cached()
     vote_map = _build_vote_map(rows)
     colset = set()
-    for d in vote_map.values():
-        colset.update(d.keys())
+    for d in vote_map.values(): colset.update(d.keys())
     for junk in ("openstates_person_id","person_id","id","name","district","party","bill","vote"):
         colset.discard(junk)
     columns = sorted(colset) if colset else cols
@@ -248,40 +199,32 @@ def api_vote_map():
 
 @app.get("/house_key_votes.csv")
 def house_key_votes():
-    if not VOTES_CSV_URL:
-        abort(404)
+    if not VOTES_CSV_URL: abort(404)
     txt = _read_text_from_url(VOTES_CSV_URL)
     return Response(txt, mimetype="text/csv")
 
 # =========================
-# FLOTERIAL OVERLAY (base CSV + town CSV)
+# FLOTERIAL CSVs (normalized)
 # =========================
 _FLOTERIAL_CACHE = {"t": 0.0, "by_base": {}, "by_town": {}}
 _FLOTERIAL_TTL = 3600  # 1h
 
 def _norm_district_label(s: str) -> str:
     m = re.search(r"([A-Za-z]+)\s*0*([0-9]+)", str(s or ""))
-    if not m:
-        return (s or "").strip()
-    county = m.group(1).title().strip()
-    num = int(m.group(2))
-    return f"{county} {num}"
+    if not m: return (s or "").strip()
+    return f"{m.group(1).title().strip()} {int(m.group(2))}"
 
 def _norm_town(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip()).title()
 
 def _load_floterial_csv(url: str):
-    """CSV loader with BOM/header normalization."""
-    if not url:
-        return []
+    if not url: return []
     txt = _read_text_from_url(url)
-    if txt.startswith("\ufeff"):
-        txt = txt.lstrip("\ufeff")
+    if txt.startswith("\ufeff"): txt = txt.lstrip("\ufeff")
     f = io.StringIO(txt)
     rdr = csv.reader(f)
     rows = list(rdr)
-    if not rows:
-        return []
+    if not rows: return []
     def norm(h: str) -> str:
         return re.sub(r"\s+", "_", (h or "").strip().strip('"').strip("'").lower().lstrip("\ufeff"))
     headers = [norm(h) for h in rows[0]]
@@ -298,24 +241,20 @@ def _load_floterials_cached():
     if _FLOTERIAL_CACHE["t"] and now - _FLOTERIAL_CACHE["t"] < _FLOTERIAL_TTL:
         return _FLOTERIAL_CACHE["by_base"], _FLOTERIAL_CACHE["by_town"]
     by_base, by_town = {}, {}
-    # base mapping
     for r in _load_floterial_csv(FLOTERIAL_BASE_CSV_URL):
-        b = _norm_district_label(r.get("base_district", "") or r.get("district", ""))
-        f = _norm_district_label(r.get("floterial_district", "") or r.get("floterial", ""))
-        if b and f:
-            by_base.setdefault(b, set()).add(f)
-    # town mapping
+        b = _norm_district_label(r.get("base_district","") or r.get("district",""))
+        f = _norm_district_label(r.get("floterial_district","") or r.get("floterial",""))
+        if b and f: by_base.setdefault(b, set()).add(f)
     for r in _load_floterial_csv(FLOTERIAL_TOWN_CSV_URL):
-        t = _norm_town(r.get("town", ""))
-        c = (r.get("county", "") or "").replace(" County", "").strip().title()
-        f = _norm_district_label(r.get("floterial_district", "") or r.get("district", ""))
-        if t and c and f:
-            by_town.setdefault((t, c), set()).add(f)
+        t = _norm_town(r.get("town",""))
+        c = (r.get("county","") or "").replace(" County","").strip().title()
+        f = _norm_district_label(r.get("floterial_district","") or r.get("district",""))
+        if t and c and f: by_town.setdefault((t,c), set()).add(f)
     _FLOTERIAL_CACHE.update({"t": now, "by_base": by_base, "by_town": by_town})
     return by_base, by_town
 
 # =========================
-# BILL LINK VIA OPENSTATES (with retry)
+# BILL LINK VIA OPENSTATES
 # =========================
 def _pick_best_bill_url(item: dict) -> str:
     for src in (item.get("sources") or []):
@@ -330,19 +269,14 @@ def _pick_best_bill_url(item: dict) -> str:
 def api_bill_link():
     if not OPENSTATES_API_KEY:
         return jsonify({"error": "OPENSTATES_API_KEY not set"}), 500
-
     bill_param = (request.args.get("bill") or "").strip()
     year_param = (request.args.get("year") or "").strip()
     if not bill_param:
         raw = (request.args.get("label") or "").strip()
         bill_param, y = _extract_bill_code_year(raw)
-        if y and not year_param:
-            year_param = y
-
+        if y and not year_param: year_param = y
     bill_code, year = _extract_bill_code_year(bill_param or "")
-    if not bill_code:
-        return jsonify({"bill": bill_param or "", "year": year_param or "", "url": ""})
-
+    if not bill_code: return jsonify({"bill": bill_param or "", "year": year_param or "", "url": ""})
     url = "https://v3.openstates.org/bills"
     params = {"jurisdiction": "New Hampshire", "q": bill_code.replace(" ", ""), "per_page": 3}
     if year: params["session"] = year
@@ -356,11 +290,9 @@ def api_bill_link():
             r.raise_for_status()
         else:
             raise
-
     items = (r.json() or {}).get("results") or (r.json() or {}).get("data") or []
     url_out = _pick_best_bill_url(items[0]) if items else ""
-    if not hasattr(app, "_BILL_CACHE"):
-        app._BILL_CACHE = {}
+    if not hasattr(app, "_BILL_CACHE"): app._BILL_CACHE = {}
     app._BILL_CACHE[f"{bill_code}:{year or ''}"] = {"url": url_out, "t": time.time()}
     return jsonify({"bill": bill_code, "year": year, "url": url_out})
 
@@ -373,10 +305,8 @@ NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 def _geocode_address(addr: str):
     try:
         params = {"address": addr, "benchmark": "Public_AR_Census2020", "format": "json"}
-        r = requests.get(CENSUS_URL, params=params, timeout=15)
-        r.raise_for_status()
-        j = r.json()
-        matches = (j.get("result") or {}).get("addressMatches") or []
+        r = requests.get(CENSUS_URL, params=params, timeout=15); r.raise_for_status()
+        j = r.json(); matches = (j.get("result") or {}).get("addressMatches") or []
         if matches:
             loc = matches[0]["coordinates"]
             return float(loc["y"]), float(loc["x"])
@@ -386,19 +316,16 @@ def _geocode_address(addr: str):
         try:
             h = {"User-Agent": f"NH-Rep-Finder/1.0 ({NOMINATIM_EMAIL or 'contact@example.com'})"}
             params = {"q": addr, "format": "json", "limit": 1, "countrycodes": "us"}
-            r = requests.get(NOMINATIM_URL, params=params, headers=h, timeout=15)
-            r.raise_for_status()
+            r = requests.get(NOMINATIM_URL, params=params, headers=h, timeout=15); r.raise_for_status()
             arr = r.json()
-            if arr:
-                return float(arr[0]["lat"]), float(arr[0]["lon"])
+            if arr: return float(arr[0]["lat"]), float(arr[0]["lon"])
         except Exception:
             pass
     return None, None
 
 def _is_lower_house(item, fallback_label=""):
     org = (item.get("organization") or item.get("org") or {})
-    if (org.get("classification") or "").lower() == "lower":
-        return True
+    if (org.get("classification") or "").lower() == "lower": return True
     person = item.get("person") or item
     roles = person.get("roles") or person.get("current_roles") or []
     if isinstance(roles, list):
@@ -413,30 +340,24 @@ def _is_lower_house(item, fallback_label=""):
     return bool(re.match(r"^[A-Za-z]+\s+\d+$", norm))
 
 def _openstates_people_geo(lat: float, lon: float):
-    if not OPENSTATES_API_KEY:
-        return []
+    if not OPENSTATES_API_KEY: return []
     url = "https://v3.openstates.org/people.geo"
     params  = {"lat": lat, "lng": lon, "per_page": 50, "jurisdiction": "New Hampshire"}
     headers = {"X-API-KEY": OPENSTATES_API_KEY}
-
     r = requests.get(url, params=params, headers=headers, timeout=20)
     try:
         r.raise_for_status()
     except requests.HTTPError:
         if r.status_code in (429, 500, 502, 503, 504):
             time.sleep(0.5)
-            r = requests.get(url, params=params, headers=headers, timeout=20)
-            r.raise_for_status()
+            r = requests.get(url, params=params, headers=headers, timeout=20); r.raise_for_status()
         else:
             raise
-
     data = r.json() or {}
     results = data.get("results") or data.get("data") or []
-
     reps = []
     for item in results:
-        if not _is_lower_house(item):
-            continue
+        if not _is_lower_house(item): continue
         person   = item.get("person") or item
         district = item.get("district") or {}
         name     = person.get("name") or person.get("given_name") or ""
@@ -454,29 +375,24 @@ def _openstates_people_geo(lat: float, lon: float):
     return reps
 
 def _openstates_people_by_district_label(label: str):
-    if not OPENSTATES_API_KEY:
-        return []
+    if not OPENSTATES_API_KEY: return []
     url = "https://v3.openstates.org/people"
     params = {"jurisdiction": "New Hampshire", "district": _norm_district_label(label), "per_page": 50}
     headers = {"X-API-KEY": OPENSTATES_API_KEY}
-
     r = requests.get(url, params=params, headers=headers, timeout=20)
     try:
         r.raise_for_status()
     except requests.HTTPError:
         if r.status_code in (429, 500, 502, 503, 504):
             time.sleep(0.5)
-            r = requests.get(url, params=params, headers=headers, timeout=20)
-            r.raise_for_status()
+            r = requests.get(url, params=params, headers=headers, timeout=20); r.raise_for_status()
         else:
             raise
-
     data = r.json() or {}
     results = data.get("results") or data.get("data") or []
     reps = []
     for item in results:
-        if not _is_lower_house(item, fallback_label=label):
-            continue
+        if not _is_lower_house(item, fallback_label=label): continue
         p = item.get("person") or item
         d = item.get("district") or {}
         parties = p.get("party") or p.get("current_parties") or []
@@ -493,7 +409,57 @@ def _openstates_people_by_district_label(label: str):
     return reps
 
 # =========================
-# FLOTERIAL OVERLAY UNION (town first, then inversion)
+# CENSUS SLDL (authoritative base)
+# =========================
+def _census_sldl_from_coords(lat: float, lon: float) -> str | None:
+    try:
+        url = "https://geocoding.geo.census.gov/geocoder/geographies/coordinates"
+        params = {"x": lon, "y": lat, "benchmark": "Public_AR_Census2020", "vintage": "Current", "format": "json"}
+        r = requests.get(url, params=params, timeout=15); r.raise_for_status()
+        g = ((r.json() or {}).get("result") or {}).get("geographies") or {}
+        rows = g.get("State Legislative Districts - Lower") or g.get("State Legislative Districts - Lower (SLDL)") or []
+        if not rows: return None
+        label = rows[0].get("BASENAME") or rows[0].get("NAME") or ""
+        return _norm_district_label(label)
+    except Exception:
+        return None
+
+# =========================
+# LABEL COMPUTATION (deterministic)
+# =========================
+def _compute_labels(lat: float, lon: float, openstates_labels, addr_text: str | None = None):
+    """Return (bases, floterials) without any floterial→base inference."""
+    by_base, by_town = _load_floterials_cached()
+
+    bases = set()
+    sldl = _census_sldl_from_coords(lat, lon)
+    if sldl:
+        bases.add(_norm_district_label(sldl))
+    for lbl in openstates_labels or []:
+        n = _norm_district_label(lbl)
+        if n in by_base:  # treat as base only if it is a real base key
+            bases.add(n)
+
+    flos = set()
+    for b in bases:
+        for f in by_base.get(b, set()):
+            flos.add(_norm_district_label(f))
+
+    town, county = _nominatim_reverse(lat, lon)
+    if (not town or not county) and addr_text:
+        at = addr_text.lower()
+        for (t, c) in by_town.keys():
+            if t.lower() in at:
+                town, county = t, c
+                break
+    if town and county:
+        for f in by_town.get((town, county), set()):
+            flos.add(_norm_district_label(f))
+
+    return bases, flos
+
+# =========================
+# REVERSE TOWN
 # =========================
 def _nominatim_reverse(lat: float, lon: float):
     try:
@@ -507,66 +473,6 @@ def _nominatim_reverse(lat: float, lon: float):
         return _norm_town(town), county.title()
     except Exception:
         return "", ""
-# Census SLDL → "Sullivan 2" style
-def _census_sldl_from_coords(lat: float, lon: float) -> str | None:
-    try:
-        url = "https://geocoding.geo.census.gov/geocoder/geographies/coordinates"
-        params = {
-            "x": lon, "y": lat, "benchmark": "Public_AR_Census2020",
-            "vintage": "Current", "format": "json"
-        }
-        r = requests.get(url, params=params, timeout=15)
-        r.raise_for_status()
-        g = ((r.json() or {}).get("result") or {}).get("geographies") or {}
-        rows = g.get("State Legislative Districts - Lower") or g.get("State Legislative Districts - Lower (SLDL)") or []
-        if not rows:
-            return None
-        row = rows[0]
-        # Try BASENAME first (often just "Sullivan 2"), then NAME
-        label = row.get("BASENAME") or row.get("NAME") or ""
-        return _norm_district_label(label)
-    except Exception:
-        return None
-
-def _overlay_district_labels(lat: float, lon: float, openstates_labels, addr_text: str | None = None):
-    by_base, by_town = _load_floterials_cached()
-
-    # ---- 1) Decide the single true BASE list (no inversion) ----
-    bases = set()
-    # a) Any base labels OpenStates already gave us
-    for lbl in openstates_labels or []:
-        n = _norm_district_label(lbl)
-        # Heuristic: if label exists as a key in by_base, treat it as a base
-        if n in by_base:
-            bases.add(n)
-    # b) Always add Census SLDL (authoritative one base)
-    sldl = _census_sldl_from_coords(lat, lon)
-    if sldl:
-        bases.add(_norm_district_label(sldl))
-
-    # If still empty, we have no base; we’ll still compute floterials from town.
-    # ---- 2) Compute floterials from chosen bases ----
-    flos = set()
-    for b in bases:
-        for f in by_base.get(b, set()):
-            flos.add(_norm_district_label(f))
-
-    # ---- 3) Add floterials from town ----
-    town, county = _nominatim_reverse(lat, lon)
-    if (not town or not county) and addr_text:
-        at = addr_text.lower()
-        for (t, c) in by_town.keys():
-            if t.lower() in at:
-                town, county = t, c
-                break
-    if town and county:
-        for f in by_town.get((town, county), set()):
-            flos.add(_norm_district_label(f))
-
-    # ---- 4) Final overlay = bases + floterials (no floterial→base) ----
-    return set(bases) | set(flos)
-
-
 
 # =========================
 # LOOKUP
@@ -596,11 +502,12 @@ def api_lookup_legislators():
         os_labels = [(r.get("district") or "") for r in reps_point]
 
         try:
-            want_labels = _overlay_district_labels(lat, lon, os_labels, addr_text=addr)
-
+            bases, flos = _compute_labels(lat, lon, os_labels, addr_text=addr)
         except Exception as e:
-            logging.exception("overlay error")
-            return jsonify(_err_json("overlay", e)), 500
+            logging.exception("label compute error")
+            return jsonify(_err_json("labels", e)), 500
+
+        want_labels = sorted(list(bases | flos))
 
         have_by_label = {_norm_district_label(r.get("district") or "") for r in reps_point}
         reps_extra = []
@@ -626,7 +533,9 @@ def api_lookup_legislators():
             "source": {
                 "geocoder": "census_or_nominatim",
                 "openstates_geo_used": bool(reps_point),
-                "overlay_labels": sorted(list(want_labels))
+                "bases": sorted(list(bases)),
+                "floterials": sorted(list(flos)),
+                "overlay_labels": want_labels
             },
             "success": True
         })
@@ -635,7 +544,7 @@ def api_lookup_legislators():
         return jsonify(_err_json("lookup-legislators", e)), 500
 
 # =========================
-# DEBUG ROUTES
+# DEBUG / DIAG
 # =========================
 @app.get("/debug/floterials")
 def debug_floterials():
@@ -685,16 +594,41 @@ def debug_district():
     reps = _openstates_people_by_district_label(label) if label else []
     return jsonify({"label": _norm_district_label(label), "count": len(reps), "reps": reps})
 
-# Version/commit probe
+# Version/commit
 BUILD_SHA = os.getenv("RENDER_GIT_COMMIT","local")
 @app.get("/version")
 def version():
     return {"commit": BUILD_SHA}
 
 # =========================
+# HEALTH (verbose)
+# =========================
+@app.get("/health")
+def health():
+    by_base, by_town = _load_floterials_cached()
+    def _raw_first(url):
+        try:
+            t = _read_text_from_url(url)
+            return t.splitlines()[0] if t else ""
+        except Exception as e:
+            return f"ERR:{type(e).__name__}"
+    return jsonify({
+        "ok": True,
+        "has_openstates_key": bool(OPENSTATES_API_KEY),
+        "votes_csv_url_set": bool(VOTES_CSV_URL),
+        "floterial_base_csv_set": bool(FLOTERIAL_BASE_CSV_URL),
+        "floterial_town_csv_set": bool(FLOTERIAL_TOWN_CSV_URL),
+        "base_to_floterial_count": sum(len(v) for v in by_base.values()),
+        "town_to_floterial_count": sum(len(v) for v in by_town.values()),
+        "base_keys_sample": sorted(list(by_base.keys()))[:5],
+        "town_keys_sample": sorted([f"{t},{c}" for (t,c) in by_town.keys()])[:5],
+        "base_csv_first_line": _raw_first(FLOTERIAL_BASE_CSV_URL),
+        "town_csv_first_line": _raw_first(FLOTERIAL_TOWN_CSV_URL),
+        "commit": BUILD_SHA
+    })
+
+# =========================
 # MAIN
 # =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=os.getenv("FLASK_DEBUG","0") == "1")
-
-
