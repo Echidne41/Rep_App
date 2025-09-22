@@ -232,38 +232,36 @@ def _census_geographies(lat: float, lon: float):
     """Return (base_sldl, town_name, county_name) from Census geographies with robust fallbacks."""
     url = "https://geocoding.geo.census.gov/geocoder/geographies/coordinates"
 
-    def _try(params):
-        r = requests.get(url, params=params, timeout=20)
+    def _try(p):
+        r = requests.get(url, params=p, timeout=20)
         r.raise_for_status()
         g = ((r.json() or {}).get("result") or {}).get("geographies") or {}
-        # SLDL rows can be under either key
         sldl = g.get("State Legislative Districts - Lower") or g.get("State Legislative Districts - Lower (SLDL)") or []
         mcd  = g.get("County Subdivisions") or g.get("County Subdivisions (MCD)") or []
         co   = g.get("Counties") or []
-        # Base district
-        base = None
-        if sldl:
-            base = _norm_district_label((sldl[0].get("BASENAME") or sldl[0].get("NAME") or ""))
-        # Town (MCD) and County
-        town   = _norm_town(mcd[0].get("NAME") or "") if mcd else ""
+        base = _norm_district_label((sldl[0].get("BASENAME") or sldl[0].get("NAME") or "")) if sldl else None
+        town = _norm_town(mcd[0].get("NAME") or "") if mcd else ""
         county = (co[0].get("NAME") or "").replace(" County","").strip().title() if co else ""
-        return base, town, county
+        return base, town, county, p
 
-    # Try the correct benchmark for this endpoint first.
+    # Correct first; then two fallbacks. Add layers=all to avoid layer-mapping issues.
     tries = [
-        {"x": lon, "y": lat, "benchmark": "Public_AR_Current", "vintage": "Current", "format": "json"},
-        {"x": lon, "y": lat, "benchmark": "4",                  "vintage": "Current", "format": "json"},   # numeric id
-        {"x": lon, "y": lat, "benchmark": "Public_AR_Census2020","vintage": "Census2020_Current", "format": "json"},
+        {"x": lon, "y": lat, "benchmark": "Public_AR_Current", "vintage": "Current", "layers": "all", "format": "json"},
+        {"x": lon, "y": lat, "benchmark": "4",                  "vintage": "Current", "layers": "all", "format": "json"},
+        {"x": lon, "y": lat, "benchmark": "Public_AR_Census2020","vintage": "Census2020_Current","layers":"all","format":"json"},
     ]
-    last_err = None
+    last_err, last_p = None, None
     for p in tries:
         try:
-            return _try(p)
+            b, t, c, used = _try(p)
+            # optional: keep for /health debugging
+            app._LAST_CENSUS_PARAMS = used
+            return b, t, c
         except Exception as e:
-            last_err = e
+            last_err, last_p = e, p
             continue
-    # If everything fails, surface a clear error
-    raise requests.HTTPError(f"Census geographies failed after fallbacks: {last_err}")
+    raise requests.HTTPError(f"Census geographies failed. Last params={last_p}, err={last_err}")
+
 
 
 # =========================
@@ -400,6 +398,10 @@ def api_lookup_legislators():
 # =========================
 # DEBUG / DIAG
 # =========================
+@app.get("/debug/census-params")
+def debug_census_params():
+    return jsonify(getattr(app, "_LAST_CENSUS_PARAMS", {}))
+
 @app.get("/debug/floterials")
 def debug_floterials():
     by_base, by_town = _load_floterials_cached()
@@ -483,4 +485,5 @@ def health():
 # =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=os.getenv("FLASK_DEBUG","0") == "1")
+
 
