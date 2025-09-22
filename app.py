@@ -85,13 +85,29 @@ FLOTERIAL_TOWN_CSV_URL = os.getenv("FLOTERIAL_TOWN_CSV_URL", "").strip()
 # =========================
 @app.get("/health")
 def health():
+    by_base, by_town = _load_floterials_cached()
+    # peek raw headers (first line) for both CSVs
+    def _raw_first(url):
+        try:
+            t = _read_text_from_url(url)
+            return t.splitlines()[0] if t else ""
+        except Exception as e:
+            return f"ERR:{type(e).__name__}"
     return jsonify({
         "ok": True,
         "has_openstates_key": bool(OPENSTATES_API_KEY),
         "votes_csv_url_set": bool(VOTES_CSV_URL),
         "floterial_base_csv_set": bool(FLOTERIAL_BASE_CSV_URL),
         "floterial_town_csv_set": bool(FLOTERIAL_TOWN_CSV_URL),
+        "base_to_floterial_count": sum(len(v) for v in by_base.values()),
+        "town_to_floterial_count": sum(len(v) for v in by_town.values()),
+        "base_keys_sample": sorted(list(by_base.keys()))[:5],
+        "town_keys_sample": sorted([f"{t},{c}" for (t,c) in by_town.keys()])[:5],
+        "base_csv_first_line": _raw_first(FLOTERIAL_BASE_CSV_URL),
+        "town_csv_first_line": _raw_first(FLOTERIAL_TOWN_CSV_URL),
+        "commit": os.getenv("RENDER_GIT_COMMIT","local")
     })
+
 
 # =========================
 # HELPERS
@@ -633,4 +649,5 @@ def version():
 # =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=os.getenv("FLASK_DEBUG","0") == "1")
+
 
