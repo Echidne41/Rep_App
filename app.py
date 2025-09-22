@@ -1,9 +1,12 @@
 """
-NH Rep Finder backend — deterministic:
-OpenStates.geo -> labels (lower chamber) [PRIMARY]
-Census -> town/county + base fallback,
-CSV overlays -> floterials by base and by town,
-OpenStates /people -> names for each label.
+NH Rep Finder backend — NO CENSUS.
+
+Pipeline:
+  Nominatim (search) -> lat/lon
+  OpenStates people.geo (PRIMARY) -> LOWER-chamber district labels at point (base + flos)
+  Nominatim (reverse) -> town/county (for by_town CSV overlays)
+  CSV overlays -> add floterials by base + by (town, county)
+  OpenStates /people -> names per label
 
 Routes:
   GET /health
@@ -16,32 +19,31 @@ Routes:
   GET /debug/floterial-headers
   GET /debug/base-map
   GET /debug/district
-  GET /debug/census-params
+  GET /debug/census-params   # always {}
 """
 
 import os, re, io, csv, time, logging
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlencode
 import requests
 
 from flask import Flask, request, jsonify, abort, Response
 from flask_cors import CORS
 
 logging.basicConfig(level=logging.INFO)
-
-# =========================
-# APP & CORS
-# =========================
 app = Flask(__name__)
 
+# -------------------------
+# CORS
+# -------------------------
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
 if "*" in ALLOWED_ORIGINS:
     CORS(app)
 else:
     CORS(app, resources={r"/*": {"origins": ALLOWED_ORIGINS}})
 
-# =========================
-# SECURITY HEADERS
-# =========================
+# -------------------------
+# SECURITY
+# -------------------------
 @app.after_request
 def _security_headers(resp):
     resp.headers["X-Frame-Options"] = "DENY"
@@ -50,9 +52,9 @@ def _security_headers(resp):
     resp.headers["Permissions-Policy"] = "geolocation=()"
     return resp
 
-# =========================
-# RATE LIMIT (60/min per IP+path)
-# =========================
+# -------------------------
+# BASIC RATE LIMIT
+# -------------------------
 RATE_LIMIT_PER_MIN = int(os.getenv("RATE_LIMIT_PER_MIN", "60"))
 RATE_WINDOW_SECS = 60
 COOL_OFF_SECS = 30
@@ -74,19 +76,20 @@ def _rate_limit_guard():
     recent.append(now)
     _hits[key] = recent
 
-# =========================
+# -------------------------
 # ENV
-# =========================
+# -------------------------
 OPENSTATES_API_KEY = os.getenv("OPENSTATES_API_KEY", "").strip()
+
 VOTES_CSV_URL = os.getenv("VOTES_CSV_URL", "").strip()
 VOTES_TTL_SECONDS = int(os.getenv("VOTES_TTL_SECONDS", "300"))
 
 FLOTERIAL_BASE_CSV_URL = os.getenv("FLOTERIAL_BASE_CSV_URL", "").strip()
 FLOTERIAL_TOWN_CSV_URL = os.getenv("FLOTERIAL_TOWN_CSV_URL", "").strip()
 
-# =========================
+# -------------------------
 # HELPERS
-# =========================
+# -------------------------
 def _read_text_from_url(url: str) -> str:
     if not url:
         return ""
@@ -105,15 +108,13 @@ def _unique_reps(reps):
     out = {}
     for r in reps:
         k = r.get("openstates_person_id") or r.get("name")
-        if k:
-            out[k] = r
+        if k: out[k] = r
     return list(out.values())
 
 def _parse_csv_text(text: str):
     rdr = csv.reader(io.StringIO(text))
     rows = list(rdr)
-    if not rows:
-        return [], []
+    if not rows: return [], []
     headers = [h.strip() for h in rows[0]]
     out = []
     for r in rows[1:]:
@@ -131,9 +132,9 @@ def _extract_bill_code_year(s: str):
 def _err_json(stage: str, exc: Exception):
     return {"error": f"{stage} failed", "message": str(exc), "type": exc.__class__.__name__}
 
-# =========================
+# -------------------------
 # CSVs (normalized)
-# =========================
+# -------------------------
 _FLOTERIAL_CACHE = {"t": 0.0, "by_base": {}, "by_town": {}}
 _FLOTERIAL_TTL = 3600  # 1h
 
@@ -181,9 +182,9 @@ def _load_floterials_cached():
     _FLOTERIAL_CACHE.update({"t": now, "by_base": by_base, "by_town": by_town})
     return by_base, by_town
 
-# =========================
-# OPENSTATES (names by district label)
-# =========================
+# -------------------------
+# OpenStates — names by district label
+# -------------------------
 def _openstates_people_by_district_label(label: str):
     if not OPENSTATES_API_KEY: return []
     url = "https://v3.openstates.org/people"
@@ -217,11 +218,10 @@ def _openstates_people_by_district_label(label: str):
         })
     return reps
 
-# =========================
-# OPENSTATES (labels by lat/lon) — PRIMARY
-# =========================
+# -------------------------
+# OpenStates — labels by point (PRIMARY)
+# -------------------------
 def _openstates_labels_by_point(lat: float, lon: float) -> set[str]:
-    """Return lower-chamber district labels covering the point from OpenStates people.geo."""
     if not OPENSTATES_API_KEY:
         return set()
     url = "https://v3.openstates.org/people.geo"
@@ -238,107 +238,60 @@ def _openstates_labels_by_point(lat: float, lon: float) -> set[str]:
             raise
     data = r.json() or {}
     labels = set()
-
     items = data.get("results") or data.get("data") or []
     for item in items:
-        # schema can vary; check item and nested person/roles
-        roles = []
-        if isinstance(item, dict):
-            roles += item.get("roles") or []
-            if "person" in item and isinstance(item["person"], dict):
-                roles += item["person"].get("roles") or []
-
+        roles = (item.get("roles") or []) + (item.get("person", {}).get("roles") or [])
         for role in roles:
             role_type = (role.get("type") or role.get("role") or "").lower()
             chamber = (role.get("chamber") or role.get("org_classification") or "").lower()
-            if role_type in ("legislator", "member") and chamber == "lower":
+            if role_type in ("legislator","member") and chamber == "lower":
                 lbl = _norm_district_label(role.get("district") or role.get("label") or "")
-                if lbl:
-                    labels.add(lbl)
+                if lbl: labels.add(lbl)
     return labels
 
-# =========================
-# CENSUS GEOCODING (fallbacks + town/county)
-# =========================
-CENSUS_ONE_LINE = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
-CENSUS_GEOG = "https://geocoding.geo.census.gov/geocoder/geographies/coordinates"
+# -------------------------
+# Nominatim geocoding (search + reverse)
+# -------------------------
+NOM_SEARCH = "https://nominatim.openstreetmap.org/search"
+NOM_REVERSE = "https://nominatim.openstreetmap.org/reverse"
+NOM_UA = {"User-Agent": "NH-Rep-Finder/1.0 (contact: admin@example.com)"}
 
-def _census_geocode(addr: str):
-    # FIXED: use Current to avoid 400s
-    params = {"address": addr, "benchmark": "Public_AR_Current", "format": "json"}
-    r = requests.get(CENSUS_ONE_LINE, params=params, timeout=20)
+def _nom_search(addr: str):
+    params = {"q": addr, "format": "json", "limit": 1, "addressdetails": 1}
+    r = requests.get(NOM_SEARCH, params=params, headers=NOM_UA, timeout=20)
     r.raise_for_status()
-    j = r.json()
-    matches = (j.get("result") or {}).get("addressMatches") or []
-    if not matches: return None, None
-    loc = matches[0]["coordinates"]
-    lat, lon = float(loc["y"]), float(loc["x"])
+    items = r.json() or []
+    if not items: return None, None
+    lat = float(items[0]["lat"]); lon = float(items[0]["lon"])
     return lat, lon
 
-def _census_geographies(lat: float, lon: float):
-    """Return (base_sldl, town_name, county_name) from Census geographies with robust fallbacks."""
-    url = CENSUS_GEOG
+def _nom_reverse(lat: float, lon: float):
+    params = {"lat": lat, "lon": lon, "format": "json", "zoom": 10, "addressdetails": 1}
+    r = requests.get(NOM_REVERSE, params=params, headers=NOM_UA, timeout=20)
+    r.raise_for_status()
+    j = r.json() or {}
+    a = j.get("address") or {}
+    town = a.get("town") or a.get("village") or a.get("city") or a.get("hamlet") or ""
+    county = (a.get("county") or "").replace(" County","").strip().title()
+    return _norm_town(town), county
 
-    def _try(p):
-        r = requests.get(url, params=p, timeout=20)
-        r.raise_for_status()
-        g = ((r.json() or {}).get("result") or {}).get("geographies") or {}
-        sldl = g.get("State Legislative Districts - Lower") or g.get("State Legislative Districts - Lower (SLDL)") or []
-        mcd  = g.get("County Subdivisions") or g.get("County Subdivisions (MCD)") or []
-        co   = g.get("Counties") or []
-        base = _norm_district_label((sldl[0].get("BASENAME") or sldl[0].get("NAME") or "")) if sldl else None
-        town = _norm_town(mcd[0].get("NAME") or "") if mcd else ""
-        county = (co[0].get("NAME") or "").replace(" County","").strip().title() if co else ""
-        return base, town, county, p
-
-    tries = [
-        {"x": lon, "y": lat, "benchmark": "Public_AR_Current",   "vintage": "Current",            "layers": "all", "format": "json"},
-        {"x": lon, "y": lat, "benchmark": "4",                   "vintage": "Current",            "layers": "all", "format": "json"},
-        {"x": lon, "y": lat, "benchmark": "Public_AR_Census2020","vintage": "Census2020_Current","layers": "all", "format": "json"},
-    ]
-    last_err, last_p = None, None
-    for p in tries:
-        try:
-            b, t, c, used = _try(p)
-            app._LAST_CENSUS_PARAMS = used
-            return b, t, c
-        except Exception as e:
-            last_err, last_p = e, p
-            app._LAST_CENSUS_PARAMS = last_p
-            continue
-    raise requests.HTTPError(f"Census geographies failed. Last params={last_p}, err={last_err}")
-
-# =========================
-# LABEL COMPUTATION (OpenStates-first + CSV overlays)
-# =========================
+# -------------------------
+# LABEL COMPUTATION (OS-first + CSV overlays; NO Census)
+# -------------------------
 def _compute_labels(lat: float, lon: float):
-    """
-    1) Ask OpenStates which LOWER-chamber districts cover the point (this should include base + flos).
-    2) If OpenStates yields nothing (rare), fall back to Census base.
-    3) Always add floterials from CSV overlays:
-         - by base label
-         - by (town, county)
-    Returns: (bases:set[str], flos:set[str], town:str, county:str)
-    """
     by_base, by_town = _load_floterials_cached()
 
-    # OpenStates-first
+    # 1) OpenStates for all lower-chamber districts at the point
     bases = _openstates_labels_by_point(lat, lon)
 
-    # Get town/county (and a base fallback if OpenStates was empty)
-    town = county = ""
-    if not bases:
-        base, town, county = _census_geographies(lat, lon)
-        bases = set([base]) if base else set()
-    else:
-        try:
-            base_tmp, town, county = _census_geographies(lat, lon)
-            if base_tmp:
-                bases.add(base_tmp)  # harmless if OS already provided it
-        except Exception:
-            pass
+    # 2) Town/County via Nominatim (for town-overlay CSV)
+    town, county = "", ""
+    try:
+        town, county = _nom_reverse(lat, lon)
+    except Exception:
+        pass
 
-    # CSV overlays
+    # 3) CSV overlays
     flos = set()
     for b in bases:
         for f in by_base.get(b, set()):
@@ -349,9 +302,9 @@ def _compute_labels(lat: float, lon: float):
 
     return bases, flos, town, county
 
-# =========================
+# -------------------------
 # VOTES passthrough
-# =========================
+# -------------------------
 _vote_cache = {"t": 0.0, "rows": [], "columns": []}
 
 def _load_votes_rows_cached():
@@ -377,9 +330,9 @@ def house_key_votes():
     txt = _read_text_from_url(VOTES_CSV_URL)
     return Response(txt, mimetype="text/csv")
 
-# =========================
+# -------------------------
 # BILL LINK VIA OPENSTATES
-# =========================
+# -------------------------
 def _pick_best_bill_url(item: dict) -> str:
     for src in (item.get("sources") or []):
         u = src.get("url")
@@ -416,9 +369,9 @@ def api_bill_link():
     items = (r.json() or {}).get("results") or (r.json() or {}).get("data") or []
     return jsonify({"bill": bill_code, "year": year, "url": _pick_best_bill_url(items[0]) if items else ""})
 
-# =========================
+# -------------------------
 # LOOKUP
-# =========================
+# -------------------------
 @app.route("/api/lookup-legislators", methods=["GET", "POST"])
 def api_lookup_legislators():
     try:
@@ -431,10 +384,10 @@ def api_lookup_legislators():
         if not addr:
             return jsonify({"error": "address is required", "hint": "Send ?address=... or JSON {address: ...}"}), 422
 
-        lat, lon = _census_geocode(addr)
+        lat, lon = _nom_search(addr)
         if lat is None or lon is None:
             return jsonify({"address": addr, "geographies": {}, "stateRepresentatives": [],
-                            "source": {"geocoder": "census", "note": "no match"}})
+                            "source": {"geocoder": "nominatim", "note": "no match"}})
 
         bases, flos, town, county = _compute_labels(lat, lon)
         want_labels = sorted(list(bases | flos))
@@ -449,7 +402,7 @@ def api_lookup_legislators():
             "geographies": {"latlon": [lat, lon], "town_county": [town, county]},
             "stateRepresentatives": reps_all,
             "source": {
-                "labels_strategy": "openstates_geo + csv_overlays (fallback: census_sldl)",
+                "labels_strategy": "openstates_geo + csv_overlays",
                 "bases": sorted(list(bases)),
                 "floterials": sorted(list(flos)),
                 "overlay_labels": want_labels
@@ -460,12 +413,13 @@ def api_lookup_legislators():
         logging.exception("lookup-legislators unhandled")
         return jsonify(_err_json("lookup-legislators", e)), 500
 
-# =========================
+# -------------------------
 # DEBUG / DIAG
-# =========================
+# -------------------------
 @app.get("/debug/census-params")
 def debug_census_params():
-    return jsonify(getattr(app, "_LAST_CENSUS_PARAMS", {}))
+    # No Census in this build
+    return jsonify({})
 
 @app.get("/debug/floterials")
 def debug_floterials():
@@ -521,9 +475,9 @@ BUILD_SHA = os.getenv("RENDER_GIT_COMMIT","local")
 def version():
     return {"commit": BUILD_SHA}
 
-# =========================
-# HEALTH (verbose)
-# =========================
+# -------------------------
+# HEALTH
+# -------------------------
 @app.get("/health")
 def health():
     by_base, by_town = _load_floterials_cached()
@@ -545,8 +499,5 @@ def health():
         "commit": BUILD_SHA
     })
 
-# =========================
-# MAIN
-# =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=os.getenv("FLASK_DEBUG","0") == "1")
