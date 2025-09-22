@@ -165,29 +165,38 @@ def geocode_oneline(addr: str) -> Tuple[float, float, dict]:
     return lat, lon, {"town": town, "county": county, "geocoder": "nominatim"}
 
 def census_sldl_from_coords(lat: float, lon: float) -> Optional[str]:
-    """
-    Use Census geographies to get SLDL (base) district number as a string, e.g., '2'.
-    """
     try:
-        r = _http_get(CENSUS_GEOG_URL, params={
-            "x": lon, "y": lat, "benchmark": "Public_AR_Current",
-            "vintage": "Current_Current", "format": "json"
-        })
+        r = _http_get(
+            "https://geocoding.geo.census.gov/geocoder/geographies/coordinates",
+            params={
+                "x": lon, "y": lat,
+                "benchmark": "Public_AR_Current",
+                "vintage": "Current_Current",
+                "format": "json",
+            },
+        )
         j = r.json() or {}
         geogs = ((j.get("result") or {}).get("geographies") or {})
-        sldl = geogs.get("State Legislative Districts - Lower", []) or geogs.get("State Legislative Districts - Lower Chamber", [])
-        if sldl:
-            rec = sldl[0]
+        # Try both common labels
+        for key in (
+            "State Legislative Districts - Lower",
+            "State Legislative Districts - Lower Chamber",
+        ):
+            arr = geogs.get(key) or []
+            if not arr:
+                continue
+            rec = arr[0] or {}
             base = str(rec.get("BASENAME") or "").strip()
             if base:
-                return str(int(base))  # strip leading zeros
-            name = str(rec.get("NAME") or "")
+                return str(int(base))
+            name = str(rec.get("NAME") or "").strip()
             m = re.search(r"(\d+)", name)
             if m:
                 return str(int(m.group(1)))
     except Exception as e:
         app.logger.warning(f"census_sldl_from_coords failed: {type(e).__name__}: {e}")
     return None
+
 
 # ---------------- OPENSTATES ----------------
 def _is_lower_nh(role: dict) -> bool:
@@ -382,3 +391,4 @@ def root():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
