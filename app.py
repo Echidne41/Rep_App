@@ -476,20 +476,33 @@ def _row_to_vote_list(row: dict) -> List[dict]:
 # =========================
 def _load_town_map(path: str) -> Dict[str, List[str]]:
     out: Dict[str, List[str]] = {}
+    # keep the built-in seed
     for t, d in NH_FLOTERIAL_BY_TOWN_BUILTIN.items():
         out.setdefault(t, []).append(d)
     if not path or not os.path.exists(path):
         return out
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            rdr = csv.DictReader(f)
+            for row in rdr:
+                # accept both schemas
                 town = (row.get("town") or row.get("Town") or "").strip().title()
-                cell = (row.get("district") or row.get("District") or "").strip()
+                county = (row.get("county") or row.get("County") or "").strip().title()
+                # v1: single label column named 'district'
+                v1 = (row.get("district") or row.get("District") or "").strip()
+                # v0: legacy 'floterial_district'
+                v0 = (row.get("floterial_district") or row.get("Floterial_District") or "").strip()
+                cell = v1 or v0
                 if not town or not cell:
                     continue
-                for d in [p.strip() for p in cell.split(";") if p.strip()]:
-                    out.setdefault(town, []).append(d)
+                # allow semicolon- or comma-separated lists
+                for d in re.split(r"[;,]", cell):
+                    d = re.sub(r"\s+", " ", d.strip())
+                    if not d:
+                        continue
+                    out.setdefault(town, [])
+                    if d not in out[town]:
+                        out[town].append(d)
     except Exception:
         pass
     return out
@@ -499,23 +512,30 @@ def _load_base_map(path: str) -> Dict[str, List[str]]:
     if not path or not os.path.exists(path):
         return out
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                base = (row.get("base_label") or row.get("base") or "").strip().title()
-                cell = (row.get("floterials") or row.get("floterial") or "").strip()
+        with open(path, "r", encoding="utf-8-sig") as f:
+            rdr = csv.DictReader(f)
+            for row in rdr:
+                # accept both schemas
+                base = (row.get("base_label") or row.get("base") or row.get("base_district") or "").strip().title()
+                # v1: 'floterials' (semicolon list)
+                v1 = (row.get("floterials") or row.get("floterial") or "").strip()
+                # v0: legacy one-per-row 'floterial_district'
+                v0 = (row.get("floterial_district") or "").strip()
+                cell = v1 or v0
                 if not base or not cell:
                     continue
-                base = re.sub(r"\s+", " ", base)
-                values = [re.sub(r"\s+", " ", p.strip()) for p in cell.split(";") if p.strip()]
-                if values:
+                labels = re.split(r"[;,]", cell) if v1 else [cell]
+                for d in labels:
+                    d = re.sub(r"\s+", " ", d.strip())
+                    if not d:
+                        continue
                     out.setdefault(base, [])
-                    for d in values:
-                        if d not in out[base]:
-                            out[base].append(d)
+                    if d not in out[base]:
+                        out[base].append(d)
     except Exception:
         pass
     return out
+
 
 FLOTERIAL_MAP_TOWN = _load_town_map(FLOTERIAL_MAP_PATH)
 FLOTERIAL_MAP_BASE = _load_base_map(FLOTERIAL_BY_BASE_PATH)
@@ -1035,3 +1055,4 @@ def root():
 if __name__ == "__main__":
     print(f"OPENSTATES_API_KEY loaded: {bool(OPENSTATES_API_KEY)}")
     app.run(host="127.0.0.1", port=int(os.getenv("PORT", "5000")), debug=True)
+
