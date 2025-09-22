@@ -111,6 +111,21 @@ def health():
 # =========================
 # HELPERS
 # =========================
+
+def _census_sldl_from_coords(lat: float, lon: float) -> str | None:
+    try:
+        url = "https://geocoding.geo.census.gov/geocoder/geographies/coordinates"
+        params = {"x": lon, "y": lat, "benchmark": "Public_AR_Census2020", "vintage": "Current", "format": "json"}
+        r = requests.get(url, params=params, timeout=15)
+        r.raise_for_status()
+        g = ((r.json() or {}).get("result") or {}).get("geographies") or {}
+        rows = g.get("State Legislative Districts - Lower") or g.get("State Legislative Districts - Lower (SLDL)") or []
+        if not rows: return None
+        label = rows[0].get("BASENAME") or rows[0].get("NAME") or ""
+        return _norm_district_label(label)
+    except Exception:
+        return None
+
 def _read_text_from_url(url: str) -> str:
     if not url:
         return ""
@@ -516,15 +531,27 @@ def _census_sldl_from_coords(lat: float, lon: float) -> str | None:
 def _overlay_district_labels(lat: float, lon: float, openstates_labels, addr_text: str | None = None):
     by_base, by_town = _load_floterials_cached()
 
-    current = {_norm_district_label(x) for x in openstates_labels if x}
-    overlay = set(current)
+    # ---- 1) Decide the single true BASE list (no inversion) ----
+    bases = set()
+    # a) Any base labels OpenStates already gave us
+    for lbl in openstates_labels or []:
+        n = _norm_district_label(lbl)
+        # Heuristic: if label exists as a key in by_base, treat it as a base
+        if n in by_base:
+            bases.add(n)
+    # b) Always add Census SLDL (authoritative one base)
+    sldl = _census_sldl_from_coords(lat, lon)
+    if sldl:
+        bases.add(_norm_district_label(sldl))
 
-    # 1) base -> floterials (if OS gave a base)
-    for lbl in list(current):
-        for f in by_base.get(lbl, set()):
-            overlay.add(_norm_district_label(f))
+    # If still empty, we have no base; we’ll still compute floterials from town.
+    # ---- 2) Compute floterials from chosen bases ----
+    flos = set()
+    for b in bases:
+        for f in by_base.get(b, set()):
+            flos.add(_norm_district_label(f))
 
-    # 2) town -> floterials
+    # ---- 3) Add floterials from town ----
     town, county = _nominatim_reverse(lat, lon)
     if (not town or not county) and addr_text:
         at = addr_text.lower()
@@ -534,20 +561,11 @@ def _overlay_district_labels(lat: float, lon: float, openstates_labels, addr_tex
                 break
     if town and county:
         for f in by_town.get((town, county), set()):
-            overlay.add(_norm_district_label(f))
+            flos.add(_norm_district_label(f))
 
-    # 3) floterial -> base, **constrained** by Census SLDL if available
-    preferred_base = _census_sldl_from_coords(lat, lon)
-    if preferred_base:
-        overlay.add(_norm_district_label(preferred_base))
-    else:
-        # fallback: previous broad inversion
-        norm_all_flos = {x for x in overlay if re.search(r"^[A-Za-z]+\s+\d+$", x)}
-        for b, fset in by_base.items():
-            if norm_all_flos & {_norm_district_label(x) for x in (fset or set())}:
-                overlay.add(_norm_district_label(b))
+    # ---- 4) Final overlay = bases + floterials (no floterial→base) ----
+    return set(bases) | set(flos)
 
-    return overlay
 
 
 # =========================
@@ -579,6 +597,7 @@ def api_lookup_legislators():
 
         try:
             want_labels = _overlay_district_labels(lat, lon, os_labels, addr_text=addr)
+
         except Exception as e:
             logging.exception("overlay error")
             return jsonify(_err_json("overlay", e)), 500
@@ -677,4 +696,5 @@ def version():
 # =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=os.getenv("FLASK_DEBUG","0") == "1")
+
 
