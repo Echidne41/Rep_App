@@ -11,6 +11,7 @@ Routes:
   GET /debug/floterial-headers
   GET /debug/base-map
   GET /debug/district
+  GET /version
 """
 
 import os, re, io, csv, time, logging
@@ -81,12 +82,11 @@ FLOTERIAL_BASE_CSV_URL = os.getenv("FLOTERIAL_BASE_CSV_URL", "").strip()
 FLOTERIAL_TOWN_CSV_URL = os.getenv("FLOTERIAL_TOWN_CSV_URL", "").strip()
 
 # =========================
-# HEALTH
+# HEALTH (verbose)
 # =========================
 @app.get("/health")
 def health():
     by_base, by_town = _load_floterials_cached()
-    # peek raw headers (first line) for both CSVs
     def _raw_first(url):
         try:
             t = _read_text_from_url(url)
@@ -107,7 +107,6 @@ def health():
         "town_csv_first_line": _raw_first(FLOTERIAL_TOWN_CSV_URL),
         "commit": os.getenv("RENDER_GIT_COMMIT","local")
     })
-
 
 # =========================
 # HELPERS
@@ -498,7 +497,6 @@ def _overlay_district_labels(lat: float, lon: float, openstates_labels):
     """Union of labels from OpenStates + base→floterials + floterial→base + town→floterials."""
     by_base, by_town = _load_floterials_cached()
 
-    # what OpenStates gave us
     current = {_norm_district_label(x) for x in openstates_labels if x}
     overlay = set(current)
 
@@ -507,10 +505,10 @@ def _overlay_district_labels(lat: float, lon: float, openstates_labels):
         for f in by_base.get(lbl, set()):
             overlay.add(_norm_district_label(f))
 
-    # 2) floterial -> base (inversion)
-    current_norm_floterials = set(current)
+    # 2) floterial -> base (add base when any of its floterials are present)
+    norm_flos = {_norm_district_label(x) for x in current}
     for b, fset in by_base.items():
-        if current_norm_floterials & {_norm_district_label(x) for x in (fset or set())}:
+        if norm_flos & {_norm_district_label(x) for x in (fset or set())}:
             overlay.add(_norm_district_label(b))
 
     # 3) town -> floterials
@@ -585,7 +583,7 @@ def api_lookup_legislators():
     except Exception as e:
         logging.exception("lookup-legislators unhandled")
         return jsonify(_err_json("lookup-legislators", e)), 500
-BUILD_SHA = os.getenv("RENDER_GIT_COMMIT","local")
+
 # =========================
 # DEBUG ROUTES
 # =========================
@@ -604,7 +602,6 @@ def debug_floterials():
         }
     })
 
-# header + sample row peek (helps spot BOM/headers)
 def _peek_csv_headers_and_rows(url: str, n: int = 3):
     try:
         txt = _read_text_from_url(url)
@@ -638,16 +635,14 @@ def debug_district():
     reps = _openstates_people_by_district_label(label) if label else []
     return jsonify({"label": _norm_district_label(label), "count": len(reps), "reps": reps})
 
-
+# Version/commit probe
+BUILD_SHA = os.getenv("RENDER_GIT_COMMIT","local")
 @app.get("/version")
 def version():
     return {"commit": BUILD_SHA}
-
 
 # =========================
 # MAIN
 # =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=os.getenv("FLASK_DEBUG","0") == "1")
-
-
