@@ -478,7 +478,7 @@ def _openstates_people_by_district_label(label: str):
     return reps
 
 # =========================
-# FLOTERIAL OVERLAY UNION (with floterial→base inversion)
+# FLOTERIAL OVERLAY UNION (town first, then inversion)
 # =========================
 def _nominatim_reverse(lat: float, lon: float):
     try:
@@ -493,29 +493,35 @@ def _nominatim_reverse(lat: float, lon: float):
     except Exception:
         return "", ""
 
-def _overlay_district_labels(lat: float, lon: float, openstates_labels):
-    """Union of labels from OpenStates + base→floterials + floterial→base + town→floterials."""
+def _overlay_district_labels(lat: float, lon: float, openstates_labels, addr_text: str | None = None):
+    """Union of labels from OpenStates + base→floterials + town→floterials + floterial→base (inversion)."""
     by_base, by_town = _load_floterials_cached()
 
     current = {_norm_district_label(x) for x in openstates_labels if x}
     overlay = set(current)
 
-    # 1) base -> floterials
+    # 1) base -> floterials (if OS gave a base)
     for lbl in list(current):
         for f in by_base.get(lbl, set()):
             overlay.add(_norm_district_label(f))
 
-    # 2) floterial -> base (add base when any of its floterials are present)
-    norm_flos = {_norm_district_label(x) for x in current}
-    for b, fset in by_base.items():
-        if norm_flos & {_norm_district_label(x) for x in (fset or set())}:
-            overlay.add(_norm_district_label(b))
-
-    # 3) town -> floterials
+    # 2) town -> floterials
     town, county = _nominatim_reverse(lat, lon)
+    if (not town or not county) and addr_text:
+        at = addr_text.lower()
+        for (t, c) in by_town.keys():
+            if t.lower() in at:
+                town, county = t, c
+                break
     if town and county:
         for f in by_town.get((town, county), set()):
             overlay.add(_norm_district_label(f))
+
+    # 3) floterial -> base (run AFTER town adds)
+    norm_all_flos = {x for x in overlay if re.search(r"^[A-Za-z]+\s+\d+$", x)}
+    for b, fset in by_base.items():
+        if norm_all_flos & {_norm_district_label(x) for x in (fset or set())}:
+            overlay.add(_norm_district_label(b))
 
     return overlay
 
@@ -547,7 +553,7 @@ def api_lookup_legislators():
         os_labels = [(r.get("district") or "") for r in reps_point]
 
         try:
-            want_labels = _overlay_district_labels(lat, lon, os_labels)
+            want_labels = _overlay_district_labels(lat, lon, os_labels, addr_text=addr)
         except Exception as e:
             logging.exception("overlay error")
             return jsonify(_err_json("overlay", e)), 500
