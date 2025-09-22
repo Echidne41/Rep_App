@@ -8,6 +8,8 @@ Routes:
   GET|POST /api/lookup-legislators
   GET /house_key_votes.csv
   GET /debug/floterials
+  GET /debug/floterial-headers
+  GET /debug/base-map
   GET /debug/district
 """
 
@@ -21,7 +23,7 @@ from flask_cors import CORS
 logging.basicConfig(level=logging.INFO)
 
 # =========================
-# APP & CORS (create app first!)
+# APP & CORS
 # =========================
 app = Flask(__name__)
 
@@ -43,7 +45,7 @@ def _security_headers(resp):
     return resp
 
 # =========================
-# GENTLE RATE LIMIT (60/min per IP+path; 30s retry-hint)
+# RATE LIMIT (60/min per IP+path)
 # =========================
 RATE_LIMIT_PER_MIN = int(os.getenv("RATE_LIMIT_PER_MIN", "60"))
 RATE_WINDOW_SECS = 60
@@ -94,29 +96,6 @@ def health():
 # =========================
 # HELPERS
 # =========================
-
-# --- DEBUG HELPERS ---
-def _peek_csv_headers_and_rows(url: str, n: int = 5):
-    if not url:
-        return {"url": url, "note": "empty url"}
-    try:
-        txt = _read_text_from_url(url)
-        # show the raw first line too (catches hidden chars)
-        raw_first_line = txt.splitlines()[0] if txt else ""
-        rdr = csv.DictReader(io.StringIO(txt))
-        rows = []
-        for i, r in enumerate(rdr):
-            if i >= n: break
-            rows.append(r)
-        return {
-            "url": url,
-            "fieldnames": rdr.fieldnames,
-            "raw_first_line": raw_first_line,
-            "sample_rows": rows
-        }
-    except Exception as e:
-        return {"url": url, "error": f"{type(e).__name__}: {e}"}
-
 def _read_text_from_url(url: str) -> str:
     if not url:
         return ""
@@ -187,7 +166,6 @@ def _load_votes_rows_cached():
     return rows, cols
 
 def _build_vote_map(rows):
-    """Return dict: person_key -> { column_or_bill_label: rawVote }."""
     out = {}
     is_long = any(("bill" in r and "vote" in r) for r in rows)
 
@@ -263,23 +241,19 @@ def _norm_town(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip()).title()
 
 def _load_floterial_csv(url: str):
-    """Load CSV with BOM/header normalization so 'base_district' is always found."""
+    """CSV loader with BOM/header normalization."""
     if not url:
         return []
     txt = _read_text_from_url(url)
-    # strip UTF-8 BOM if present
     if txt.startswith("\ufeff"):
         txt = txt.lstrip("\ufeff")
-
     f = io.StringIO(txt)
     rdr = csv.reader(f)
     rows = list(rdr)
     if not rows:
         return []
-
     def norm(h: str) -> str:
         return re.sub(r"\s+", "_", (h or "").strip().strip('"').strip("'").lower().lstrip("\ufeff"))
-
     headers = [norm(h) for h in rows[0]]
     out = []
     for r in rows[1:]:
@@ -288,7 +262,6 @@ def _load_floterial_csv(url: str):
             d[h] = (r[i].strip() if i < len(r) else "")
         out.append(d)
     return out
-
 
 def _load_floterials_cached():
     now = time.time()
@@ -356,20 +329,18 @@ def api_bill_link():
 
     items = (r.json() or {}).get("results") or (r.json() or {}).get("data") or []
     url_out = _pick_best_bill_url(items[0]) if items else ""
-    # tiny in-memory cache (1h)
     if not hasattr(app, "_BILL_CACHE"):
         app._BILL_CACHE = {}
     app._BILL_CACHE[f"{bill_code}:{year or ''}"] = {"url": url_out, "t": time.time()}
     return jsonify({"bill": bill_code, "year": year, "url": url_out})
 
 # =========================
-# OPENSTATES LOOKUPS (lower chamber only, with retry)
+# OPENSTATES LOOKUPS
 # =========================
 CENSUS_URL = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 
 def _geocode_address(addr: str):
-    # Try Census first
     try:
         params = {"address": addr, "benchmark": "Public_AR_Census2020", "format": "json"}
         r = requests.get(CENSUS_URL, params=params, timeout=15)
@@ -381,7 +352,6 @@ def _geocode_address(addr: str):
             return float(loc["y"]), float(loc["x"])
     except Exception:
         pass
-    # Fallback Nominatim (polite UA)
     if NOMINATIM_FALLBACK:
         try:
             h = {"User-Agent": f"NH-Rep-Finder/1.0 ({NOMINATIM_EMAIL or 'contact@example.com'})"}
@@ -396,7 +366,6 @@ def _geocode_address(addr: str):
     return None, None
 
 def _is_lower_house(item, fallback_label=""):
-    """Return True only for NH House members (lower chamber)."""
     org = (item.get("organization") or item.get("org") or {})
     if (org.get("classification") or "").lower() == "lower":
         return True
@@ -414,7 +383,6 @@ def _is_lower_house(item, fallback_label=""):
     return bool(re.match(r"^[A-Za-z]+\s+\d+$", norm))
 
 def _openstates_people_geo(lat: float, lon: float):
-    """OpenStates /people.geo (lng param), NH-only, lower chamber, with retry."""
     if not OPENSTATES_API_KEY:
         return []
     url = "https://v3.openstates.org/people.geo"
@@ -456,7 +424,6 @@ def _openstates_people_geo(lat: float, lon: float):
     return reps
 
 def _openstates_people_by_district_label(label: str):
-    """OpenStates /people (by district), NH-only, lower chamber, with retry."""
     if not OPENSTATES_API_KEY:
         return []
     url = "https://v3.openstates.org/people"
@@ -496,7 +463,7 @@ def _openstates_people_by_district_label(label: str):
     return reps
 
 # =========================
-# FLOTERIAL OVERLAY UNION
+# FLOTERIAL OVERLAY UNION (with floterial→base inversion)
 # =========================
 def _nominatim_reverse(lat: float, lon: float):
     try:
@@ -512,21 +479,34 @@ def _nominatim_reverse(lat: float, lon: float):
         return "", ""
 
 def _overlay_district_labels(lat: float, lon: float, openstates_labels):
-    """Union of labels from OpenStates + base→floterials + town→floterials."""
+    """Union of labels from OpenStates + base→floterials + floterial→base + town→floterials."""
     by_base, by_town = _load_floterials_cached()
+
+    # what OpenStates gave us
     current = {_norm_district_label(x) for x in openstates_labels if x}
     overlay = set(current)
+
+    # 1) base -> floterials
     for lbl in list(current):
         for f in by_base.get(lbl, set()):
             overlay.add(_norm_district_label(f))
+
+    # 2) floterial -> base (inversion)
+    current_norm_floterials = set(current)
+    for b, fset in by_base.items():
+        if current_norm_floterials & {_norm_district_label(x) for x in (fset or set())}:
+            overlay.add(_norm_district_label(b))
+
+    # 3) town -> floterials
     town, county = _nominatim_reverse(lat, lon)
     if town and county:
         for f in by_town.get((town, county), set()):
             overlay.add(_norm_district_label(f))
+
     return overlay
 
 # =========================
-# LOOKUP ROUTE (hardened)
+# LOOKUP
 # =========================
 @app.route("/api/lookup-legislators", methods=["GET", "POST"])
 def api_lookup_legislators():
@@ -581,9 +561,10 @@ def api_lookup_legislators():
             "stateRepresentatives": reps_all,
             "source": {
                 "geocoder": "census_or_nominatim",
-                "openstates_geo": True,
+                "openstates_geo_used": bool(reps_point),
                 "overlay_labels": sorted(list(want_labels))
-            }
+            },
+            "success": True
         })
     except Exception as e:
         logging.exception("lookup-legislators unhandled")
@@ -607,6 +588,33 @@ def debug_floterials():
         }
     })
 
+# header + sample row peek (helps spot BOM/headers)
+def _peek_csv_headers_and_rows(url: str, n: int = 3):
+    try:
+        txt = _read_text_from_url(url)
+        raw_first = txt.splitlines()[0] if txt else ""
+        rdr = csv.DictReader(io.StringIO(txt))
+        rows = []
+        for i, r in enumerate(rdr):
+            if i >= n: break
+            rows.append(r)
+        return {"url": url, "fieldnames": rdr.fieldnames, "raw_first_line": raw_first, "sample_rows": rows}
+    except Exception as e:
+        return {"url": url, "error": f"{type(e).__name__}: {e}"}
+
+@app.get("/debug/floterial-headers")
+def debug_floterial_headers():
+    return jsonify({
+        "base": _peek_csv_headers_and_rows(FLOTERIAL_BASE_CSV_URL),
+        "town": _peek_csv_headers_and_rows(FLOTERIAL_TOWN_CSV_URL),
+    })
+
+@app.get("/debug/base-map")
+def debug_base_map():
+    label = _norm_district_label(request.args.get("label",""))
+    by_base, _ = _load_floterials_cached()
+    vals = sorted(list(by_base.get(label, set())))
+    return jsonify({"label": label, "has_label": label in by_base, "count": len(vals), "floterials": vals})
 
 @app.get("/debug/district")
 def debug_district():
@@ -619,5 +627,3 @@ def debug_district():
 # =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=os.getenv("FLASK_DEBUG","0") == "1")
-
-
