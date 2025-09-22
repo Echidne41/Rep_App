@@ -569,7 +569,7 @@ def api_lookup_legislators():
     except Exception as e:
         logging.exception("lookup-legislators unhandled")
         return jsonify(_err_json("lookup-legislators", e)), 500
-
+BUILD_SHA = os.getenv("RENDER_GIT_COMMIT","local")
 # =========================
 # DEBUG ROUTES
 # =========================
@@ -622,8 +622,15 @@ def debug_district():
     reps = _openstates_people_by_district_label(label) if label else []
     return jsonify({"label": _norm_district_label(label), "count": len(reps), "reps": reps})
 
+
+@app.get("/version")
+def version():
+    return {"commit": BUILD_SHA}
+
+
 # =========================
 # MAIN
 # =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=os.getenv("FLASK_DEBUG","0") == "1")
+
