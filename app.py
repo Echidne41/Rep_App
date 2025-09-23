@@ -1,32 +1,23 @@
 """
-NH Rep Finder backend — OpenStates-first, CSV overlays, no Census geographies.
+NH Rep Finder backend — resilient OpenStates-first lookup (probe ring) + CSV overlays.
 
 Pipeline:
-  1) Geocode: Nominatim (with optional Census oneline Fallback) -> lat/lon
-  2) District labels: OpenStates people.geo (lower chamber) -> base + any floterials OS knows
+  1) Geocode: Nominatim (optional Census oneline fallback) -> lat/lon
+  2) District labels: OpenStates people.geo (probe ring) -> base + floterials
   3) Reverse geocode (Nominatim) -> town/county (for town-overlay CSV)
-  4) CSV overlays -> add floterials by BASE label and by (TOWN, COUNTY)
+  4) CSV overlays -> add floterials by BASE label and (TOWN, COUNTY)
   5) Names: OpenStates /people (by district label)
-  6) Votes: /api/key-votes (CSV-backed)
+  6) Votes: CSV-backed endpoints
 
-Routes:
-  GET /health
-  GET /version
-  GET /api/lookup-legislators
-  GET /api/key-votes
-  GET /api/vote-map
-  GET /house_key_votes.csv
-  GET /debug/floterials
-  GET /debug/floterial-headers
-  GET /debug/trace
-  GET /debug/district
+Debug:
+  /health, /version, /debug/floterials, /debug/floterial-headers, /debug/trace, /debug/district
 """
 
-import os, re, io, csv, time, logging, json
-from urllib.parse import urlparse, urlencode
+import os, re, io, csv, time, logging
+from urllib.parse import urlparse
 from typing import Dict, List, Tuple, Optional
-import requests
 
+import requests
 from flask import Flask, request, jsonify, abort, Response
 from flask_cors import CORS
 
@@ -37,7 +28,7 @@ CORS(app)
 # =========================
 # ENV
 # =========================
-OPENSTATES_API_KEY = os.getenv("OPENSTATES_API_KEY", "").strip()
+OPENSTATES_API_KEY = (os.getenv("OPENSTATES_API_KEY", "") or "").strip()
 
 # CSV sources: support both styles (baked file URLs OR repo-relative paths)
 FLOTERIAL_BASE_CSV_URL = (os.getenv("FLOTERIAL_BASE_CSV_URL", "") or "").strip()
@@ -53,12 +44,16 @@ VOTES_TTL_SECONDS = int(os.getenv("VOTES_TTL_SECONDS", "300"))
 NOMINATIM_EMAIL   = (os.getenv("NOMINATIM_EMAIL", "ops@example.org") or "").strip()
 GEOCODE_FALLBACK  = (os.getenv("GEOCODE_FALLBACK", "") or "").lower()  # "" or "census"
 
+# Probe ring for people.geo (fixes sparse returns at exact point)
+PROBE_START_DEG = float(os.getenv("PROBE_START_DEG", "0.01"))
+PROBE_STEP_DEG  = float(os.getenv("PROBE_STEP_DEG",  "0.01"))
+PROBE_MAX_RINGS = int(os.getenv("PROBE_MAX_RINGS",  "2"))
+
 # =========================
 # Helpers
 # =========================
 def _read_text_from_url(url: str) -> str:
-    if not url:
-        return ""
+    if not url: return ""
     if url.lower().startswith("file://"):
         path = urlparse(url).path
         with open(path, "r", encoding="utf-8") as f:
@@ -139,7 +134,6 @@ def _load_floterials_cached():
     if _FLOTERIAL_CACHE["t"] and now - _FLOTERIAL_CACHE["t"] < _FLOTERIAL_TTL:
         return _FLOTERIAL_CACHE["by_base"], _FLOTERIAL_CACHE["by_town"]
 
-    # Resolve URLs: prefer baked URLs; fall back to repo-relative paths if needed
     base_url = FLOTERIAL_BASE_CSV_URL or (_file_url_from_rel(FLOTERIAL_BY_BASE_PATH) if FLOTERIAL_BY_BASE_PATH else "")
     town_url = FLOTERIAL_TOWN_CSV_URL or (_file_url_from_rel(FLOTERIAL_MAP_PATH)     if FLOTERIAL_MAP_PATH     else "")
 
@@ -163,26 +157,48 @@ def _os_headers():
 def _os_get(url: str, params: dict) -> dict:
     r = requests.get(url, params=params, headers=_os_headers(), timeout=20)
     if r.status_code in (429, 500, 502, 503, 504):
-        time.sleep(0.5); r = requests.get(url, params=params, headers=_os_headers(), timeout=20)
+        time.sleep(0.6); r = requests.get(url, params=params, headers=_os_headers(), timeout=20)
     r.raise_for_status()
     return r.json() or {}
 
-def _openstates_labels_by_point(lat: float, lon: float) -> set:
-    if not OPENSTATES_API_KEY: return set()
+def _os_people_geo(lat: float, lon: float) -> list:
     url = "https://v3.openstates.org/people.geo"
     params = {"lat": lat, "lng": lon, "per_page": 50}
-    data = _os_get(url, params)
-    labels = set()
-    items = data.get("results") or data.get("data") or []
-    for item in items:
-        roles = (item.get("roles") or []) + (item.get("person", {}).get("roles") or [])
-        for role in roles:
-            role_type = (role.get("type") or role.get("role") or "").lower()
-            chamber   = (role.get("chamber") or role.get("org_classification") or "").lower()
-            if role_type in ("legislator","member") and chamber == "lower":
-                lbl = _norm_label(role.get("district") or role.get("label") or "")
-                if lbl:
-                    labels.add(lbl)
+    try:
+        r = requests.get(url, params=params, headers=_os_headers(), timeout=20)
+        if r.status_code in (429, 500, 502, 503, 504):
+            time.sleep(0.6); r = requests.get(url, params=params, headers=_os_headers(), timeout=20)
+        r.raise_for_status()
+        j = r.json() or {}
+        return j.get("results") or j.get("data") or []
+    except Exception:
+        return []
+
+def _labels_probe_union(lat: float, lon: float) -> set:
+    labels: set = set()
+    # center first, then neighbors until we get something
+    def neighbors():
+        yield (lat, lon)
+        for r in range(1, PROBE_MAX_RINGS + 1):
+            d = PROBE_START_DEG + (r - 1) * PROBE_STEP_DEG
+            for dy in (-d, 0, d):
+                for dx in (-d, 0, d):
+                    if dx == 0 and dy == 0: continue
+                    yield (lat + dy, lon + dx)
+    for y, x in neighbors():
+        items = _os_people_geo(y, x)
+        if not items: 
+            continue
+        for it in items:
+            roles = (it.get("roles") or []) + (it.get("person", {}).get("roles") or [])
+            for role in roles:
+                role_type = (role.get("type") or role.get("role") or "").lower()
+                chamber   = (role.get("chamber") or role.get("org_classification") or "").lower()
+                if role_type in ("legislator","member") and chamber == "lower":
+                    lbl = _norm_label(role.get("district") or role.get("label") or "")
+                    if lbl: labels.add(lbl)
+        if labels:
+            break
     return labels
 
 def _openstates_people_by_label(label: str) -> List[dict]:
@@ -209,7 +225,7 @@ def _openstates_people_by_label(label: str) -> List[dict]:
     return out
 
 # =========================
-# Geocoding (Nominatim + optional Census fallback for coords only)
+# Geocoding (Nominatim + optional Census oneline fallback)
 # =========================
 NOM_SEARCH  = "https://nominatim.openstreetmap.org/search"
 NOM_REVERSE = "https://nominatim.openstreetmap.org/reverse"
@@ -241,22 +257,22 @@ def _census_oneline_geocode(addr: str) -> Tuple[Optional[float], Optional[float]
     c = matches[0]["coordinates"]; return float(c["y"]), float(c["x"])
 
 # =========================
-# District computation
+# District computation (with probe ring)
 # =========================
 def _compute_labels(lat: float, lon: float) -> Tuple[set, set, str, str]:
     by_base, by_town = _load_floterials_cached()
 
-    # 1) Base/Flot labels from OpenStates point service
-    bases = _openstates_labels_by_point(lat, lon)
+    # Robust labels from OpenStates point service (probe ring)
+    bases = _labels_probe_union(lat, lon)
 
-    # 2) Town/County for town overlays
+    # Town/County for town overlays
     town, county = "", ""
     try:
         town, county = _nom_reverse(lat, lon)
     except Exception:
         pass
 
-    # 3) CSV overlays: by base label + by (town, county)
+    # CSV overlays: by base + by town/county
     flos = set()
     for b in bases:
         for f in by_base.get(_norm_label(b), set()):
@@ -305,7 +321,6 @@ def _load_votes_rows_cached():
     if _vote_cache["t"] and now - _vote_cache["t"] < VOTES_TTL_SECONDS:
         return _vote_cache["rows"], _vote_cache["columns"]
     if not VOTES_CSV_URL:
-        # fallback to bundled file
         local = os.path.join(os.path.dirname(__file__), "house_key_votes.csv").replace("\\", "/")
         if os.path.exists(local):
             text = _read_text_maybe_file(f"file://{local}")
@@ -369,7 +384,7 @@ def api_lookup_legislators():
             lat = lon = None
             try: lat, lon = _nom_search(addr)
             except Exception: pass
-            if lat is None or lon is None and GEOCODE_FALLBACK == "census":
+            if (lat is None or lon is None) and GEOCODE_FALLBACK == "census":
                 try: lat, lon = _census_oneline_geocode(addr)
                 except Exception: pass
             if lat is None or lon is None:
@@ -379,27 +394,19 @@ def api_lookup_legislators():
         bases, flos, town, county = _compute_labels(lat, lon)
 
         # ensure BASE roster is included even if people.geo omitted it
-        # pick a single "base" to guarantee (if many lower-chamber labels overlap, all are bases anyway)
-        ensured = set(bases)
         reps_all = []
-
-        # include base label reps explicitly
         for base_lbl in sorted(list(bases)):
-            ensured.add(_norm_label(base_lbl))
             reps_all.extend(_openstates_people_by_label(base_lbl))
-
-        # include floterials (union)
         for lbl in sorted(list(flos)):
             reps_all.extend(_openstates_people_by_label(lbl))
-
         reps_all = _unique_reps(reps_all)
 
-        # Response shape (flat "data" object for frontend)
+        # Response (flat data object for frontend)
         return jsonify({
             "success": True,
             "data": {
                 "address": addr or None,
-                "geographies": {"town_county": [town, county], "sldl": list(ensured)[0] if ensured else None},
+                "geographies": {"town_county": [town, county], "sldl": (sorted(list(bases))[0] if bases else None)},
                 "stateRepresentatives": reps_all
             }
         })
@@ -407,7 +414,6 @@ def api_lookup_legislators():
         logging.exception("lookup-legislators unhandled")
         return jsonify(_err_json("lookup-legislators", e)), 500
 
-# Per-rep votes
 @app.get("/api/key-votes")
 def api_key_votes():
     person_id = (request.args.get("person_id") or "").strip()
@@ -423,12 +429,10 @@ def api_key_votes():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-# Vote map (bulk)
 @app.get("/api/vote-map")
 def api_vote_map():
     try:
         rows, cols = _load_votes_rows_cached()
-        # build simple map: person_id/name+district -> { bill: vote }
         out = {}
         def _norm(s): return re.sub(r"[^a-z0-9]+","",str(s or "").lower())
         for r in rows:
@@ -452,7 +456,6 @@ def api_vote_map():
 
 @app.get("/house_key_votes.csv")
 def house_key_votes():
-    # serve bundled file if present
     local = os.path.join(os.path.dirname(__file__), "house_key_votes.csv")
     if os.path.exists(local):
         with open(local, "r", encoding="utf-8") as f:
@@ -510,14 +513,13 @@ def debug_trace():
     lat = lon = None
     try: lat, lon = _nom_search(addr)
     except Exception: pass
-    if lat is None or lon is None and GEOCODE_FALLBACK == "census":
+    if (lat is None or lon is None) and GEOCODE_FALLBACK == "census":
         try: lat, lon = _census_oneline_geocode(addr)
         except Exception: pass
     if lat is None or lon is None:
         return jsonify({"error": "geocode failed"}), 400
     bases, flos, town, county = _compute_labels(lat, lon)
     by_base, by_town = _load_floterials_cached()
-    # Show what CSVs would add explicitly
     base_over = sorted(list({f for b in bases for f in by_base.get(_norm_label(b), set())}))
     town_over = sorted(list(by_town.get((_norm_town(town), county), set())))
     return jsonify({
