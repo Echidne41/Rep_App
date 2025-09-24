@@ -2,20 +2,20 @@ import os, time, json, csv, requests
 from functools import lru_cache
 from typing import Dict, Any, List, Tuple, Optional
 from flask import Flask, jsonify, request
-from flask_cors import CORS  # NEW
+from flask_cors import CORS  # CORS
 
 from utils.geocode import geocode_address, GeocodeError
 from utils.districts import DistrictIndex
 
 app = Flask(__name__)
 
-# ---- CORS ----
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*")
-if ALLOWED_ORIGINS.strip() == "*" or ALLOWED_ORIGINS.strip() == "":
-    CORS(app)  # allow all
+# --- CORS: allow all (you can lock down later via ALLOWED_ORIGINS) ---
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").strip()
+if ALLOWED_ORIGINS == "*" or ALLOWED_ORIGINS == "":
+    CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
 else:
     origins = [o.strip() for o in ALLOWED_ORIGINS.split(",") if o.strip()]
-    CORS(app, resources={r"/*": {"origins": origins}})
+    CORS(app, resources={r"/*": {"origins": origins}}, supports_credentials=False)
 
 # ---------- Config ----------
 OPENSTATES_API_KEY = os.getenv("OPENSTATES_API_KEY", "")
@@ -38,7 +38,6 @@ HOUSE_GEOJSON_PATH = os.getenv("HOUSE_GEOJSON_PATH", "data/nh_house_districts.js
 # ---------- OpenStates ----------
 OS_BASE = "https://v3.openstates.org"
 _last_call_ts = 0.0
-
 def _os_throttle():
     global _last_call_ts
     now = time.time()
@@ -162,7 +161,7 @@ def health():
             "os_min_delay_ms": OS_MIN_DELAY_MS,
             "os_ttl_seconds": OS_TTL_SECONDS,
             "house_geojson": HOUSE_GEOJSON_PATH,
-            "allowed_origins": ALLOWED_ORIGINS,
+            "allowed_origins": ALLOWED_ORIGINS or "*",
         },
         "csv": _csv_counts(),
         "commit": RENDER_COMMIT,
@@ -210,11 +209,6 @@ def debug_district():
     if "error" in payload:
         return jsonify({"ok": False, **payload}), 429 if payload.get("status") == 429 else 502
     return jsonify({"ok": True, "district": label, "people": _extract_people(payload)})
-
-@app.route("/api/vote-map")
-def api_vote_map():
-    # lightweight passthrough for now
-    return jsonify({"ok": True})
 
 @app.route("/api/lookup-legislators")
 def api_lookup_legislators():
