@@ -7,39 +7,35 @@ from typing import Dict, Any, List, Tuple, Optional
 from flask import Flask, jsonify, request
 import requests
 
-# --- Geocoder (Nominatim-only) ---
 from utils.geocode import geocode_address, GeocodeError
+from utils.districts import DistrictIndex  # NEW
 
 app = Flask(__name__)
 
-# -------- Config from ENV ----------
+# ---------- Config ----------
 OPENSTATES_API_KEY = os.getenv("OPENSTATES_API_KEY", "")
 NOMINATIM_EMAIL    = os.getenv("NOMINATIM_EMAIL", "rep-app@yourorg.org")
 
-# CSV locations (Render "file://..." or local paths)
 FLOTERIAL_BASE_CSV_URL = os.getenv("FLOTERIAL_BASE_CSV_URL")
 FLOTERIAL_TOWN_CSV_URL = os.getenv("FLOTERIAL_TOWN_CSV_URL")
 FLOTERIAL_BY_BASE_PATH = os.getenv("FLOTERIAL_BY_BASE_PATH", "floterial_by_base.csv")
 FLOTERIAL_MAP_PATH     = os.getenv("FLOTERIAL_MAP_PATH", "floterial_by_town.csv")
 
-VOTES_CSV_URL   = os.getenv("VOTES_CSV_URL")  # optional override
+VOTES_CSV_URL   = os.getenv("VOTES_CSV_URL")
 VOTES_TTL_SECONDS = int(os.getenv("VOTES_TTL_SECONDS", os.getenv("OS_TTL_SECONDS", "300")))
 
-# Rate-limit knobs (OpenStates)
 OS_MIN_DELAY_MS = int(os.getenv("OS_MIN_DELAY_MS", "350"))
 OS_TTL_SECONDS  = int(os.getenv("OS_TTL_SECONDS", "180"))
 
-# Probe ring (kept for compatibility; not used if district-by-label is called explicitly)
-PROBE_START_DEG = float(os.getenv("PROBE_START_DEG", "0.02"))
-PROBE_STEP_DEG  = float(os.getenv("PROBE_STEP_DEG", "0.01"))
-PROBE_MAX_RINGS = int(os.getenv("PROBE_MAX_RINGS", "3"))
+RENDER_COMMIT   = os.getenv("RENDER_GIT_COMMIT", "")
 
-RENDER_COMMIT   = os.getenv("RENDER_GIT_COMMIT", "")  # Render injects this on deploys
+# GeoJSON path (we just committed this)
+HOUSE_GEOJSON_PATH = os.getenv("HOUSE_GEOJSON_PATH", "data/nh_house_districts.geojson")
 
-# -------- OpenStates helpers --------
+# ---------- OpenStates ----------
 OS_BASE = "https://v3.openstates.org"
-
 _last_call_ts = 0.0
+
 def _os_throttle():
     global _last_call_ts
     now = time.time()
@@ -56,22 +52,15 @@ def _os_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
     headers = {"X-API-Key": OPENSTATES_API_KEY, "Accept": "application/json"}
     r = requests.get(f"{OS_BASE}{path}", params=params, headers=headers, timeout=20)
     if r.status_code == 429:
-        # serve structured error so frontend knows it's rate-limit
         return {"error": "rate_limited", "status": 429, "detail": r.text[:200]}
     r.raise_for_status()
     return r.json()
 
 @lru_cache(maxsize=2048)
 def os_people_by_district(label: str) -> Dict[str, Any]:
-    # cache w/ soft TTL: bake TTL into cache key by minute bucket
     return _os_get(
         "/people",
-        {
-            "jurisdiction": "New Hampshire",
-            "chamber": "lower",
-            "district": label,
-            "per_page": 50,
-        },
+        {"jurisdiction": "New Hampshire", "chamber": "lower", "district": label, "per_page": 50},
     )
 
 def _extract_people(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -89,12 +78,11 @@ def _extract_people(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         })
     return out
 
-# -------- Floterial CSV loading --------
+# ---------- CSV helpers ----------
 def _read_csv_from(url_or_path: Optional[str], fallback_path: str) -> Tuple[List[str], List[List[str]]]:
     path = (url_or_path or "").strip()
     if path.startswith("file:///"):
-        # Render "file:///" points to container path
-        real = path[len("file://"):]  # keep leading /opt/...
+        real = path[len("file://"):]
     elif path:
         real = path
     else:
@@ -106,26 +94,48 @@ def _read_csv_from(url_or_path: Optional[str], fallback_path: str) -> Tuple[List
         with open(real, newline="", encoding="utf-8-sig") as f:
             reader = csv.reader(f)
             for i, row in enumerate(reader):
-                if i == 0:
-                    headers = row
-                else:
-                    rows.append(row)
+                if i == 0: headers = row
+                else: rows.append(row)
     except FileNotFoundError:
-        # best-effort: try fallback_path if the url/path failed
         if real != fallback_path:
             try:
                 with open(fallback_path, newline="", encoding="utf-8-sig") as f:
                     reader = csv.reader(f)
                     for i, row in enumerate(reader):
-                        if i == 0:
-                            headers = row
-                        else:
-                            rows.append(row)
+                        if i == 0: headers = row
+                        else: rows.append(row)
             except Exception:
                 pass
     except Exception:
         pass
     return headers, rows
+
+def _norm(h: str) -> str:
+    return h.strip().lower().replace(" ", "_")
+
+def _pick_cols(headers: List[str]) -> Tuple[Optional[int], Optional[int]]:
+    key_idx = val_idx = None
+    for i, h in enumerate(headers):
+        hn = _norm(h)
+        if hn in ("base", "base_district", "base_label"): key_idx = i
+        if hn in ("floterial", "overlay", "floterial_label", "floterial_district"): val_idx = i
+    return key_idx, val_idx
+
+def _group_sample(headers: List[str], rows: List[List[str]]) -> Dict[str, List[str]]:
+    out: Dict[str, List[str]] = {}
+    if not headers:
+        return out
+    key_idx, val_idx = _pick_cols(headers)
+    if key_idx is None or val_idx is None:
+        return out
+    for r in rows[:50]:
+        if len(r) <= max(key_idx, val_idx): continue
+        base = r[key_idx].strip(); flo = r[val_idx].strip()
+        if base and flo:
+            out.setdefault(base, [])
+            if flo not in out[base]:
+                out[base].append(flo)
+    return out
 
 def _csv_counts() -> Dict[str, Any]:
     by_base_h, by_base_r = _read_csv_from(FLOTERIAL_BASE_CSV_URL, FLOTERIAL_BY_BASE_PATH)
@@ -135,65 +145,15 @@ def _csv_counts() -> Dict[str, Any]:
         "by_base_count": len(by_base_r),
         "by_town_path": FLOTERIAL_MAP_PATH,
         "by_town_count": len(by_town_r),
-        "headers": {
-            "by_base": by_base_h,
-            "by_town": by_town_h,
-        },
+        "headers": {"by_base": by_base_h, "by_town": by_town_h},
         "sample_by_base": dict(list(_group_sample(by_base_h, by_base_r).items())[:3]),
         "sample_by_town": dict(list(_group_sample(by_town_h, by_town_r).items())[:3]),
     }
 
-def _group_sample(headers: List[str], rows: List[List[str]]) -> Dict[str, List[str]]:
-    out: Dict[str, List[str]] = {}
-    if not headers:
-        return out
-    # try to find expected columns
-    key_idx = None
-    val_idx = None
-    # common header names
-    for i, h in enumerate(headers):
-        if h.strip().lower() in ("base", "base_district", "base_label"):
-            key_idx = i
-        if h.strip().lower() in ("floterial", "overlay", "floterial_label"):
-            val_idx = i
-    if key_idx is None or val_idx is None:
-        return out
-    for r in rows[:20]:
-        if len(r) <= max(key_idx, val_idx):
-            continue
-        base = r[key_idx].strip()
-        flo = r[val_idx].strip()
-        out.setdefault(base, [])
-        if flo and flo not in out[base]:
-            out[base].append(flo)
-    return out
-
-# -------- Votes (CSV) --------
-_votes_cache: Dict[str, Any] = {"ts": 0.0, "data": None}
-
-def _load_votes() -> Any:
-    now = time.time()
-    if _votes_cache["data"] is not None and now - _votes_cache["ts"] < VOTES_TTL_SECONDS:
-        return _votes_cache["data"]
-    path = None
-    if VOTES_CSV_URL:
-        path = VOTES_CSV_URL[len("file://"):] if VOTES_CSV_URL.startswith("file://") else VOTES_CSV_URL
-    else:
-        path = os.path.join(os.path.dirname(__file__), "house_key_votes.csv")  # bundled default if present
-    out = {"ok": False, "count": 0, "rows": []}
-    try:
-        with open(path, newline="", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-            out = {"ok": True, "count": len(rows), "rows": rows}
-    except Exception as e:
-        out = {"ok": False, "error": str(e)}
-    _votes_cache["ts"] = now
-    _votes_cache["data"] = out
-    return out
+# ---------- Load GeoJSON once ----------
+DISTRICTS = DistrictIndex.from_geojson_path(HOUSE_GEOJSON_PATH)
 
 # ================== ROUTES ==================
-
 @app.route("/health")
 def health():
     csv_info = _csv_counts()
@@ -204,6 +164,7 @@ def health():
             "nominatim_email": NOMINATIM_EMAIL,
             "os_min_delay_ms": OS_MIN_DELAY_MS,
             "os_ttl_seconds": OS_TTL_SECONDS,
+            "house_geojson": HOUSE_GEOJSON_PATH,
         },
         "csv": csv_info,
         "commit": RENDER_COMMIT,
@@ -233,15 +194,15 @@ def debug_trace():
     except GeocodeError as e:
         return jsonify({"ok": False, "error": f"geocode_failed: {e}"}), 502
 
-    # NOTE: base district discovery is implementation-specific.
-    # We return the lat/lon + echo back so downstream can be tested.
+    found = DISTRICTS.find(lat, lon)
+    base_label = found[0] if found else None
     return jsonify({
         "ok": True,
         "inputAddress": addr,
-        "lat": lat,
-        "lon": lon,
+        "lat": lat, "lon": lon,
         "geocode": raw,
-        "note": "Geocode succeeded. If base-district lookup still fails, use /debug/district?label=… to test OpenStates path while rate-limiting is tuned."
+        "base_district_label": base_label,
+        "note": "If base_district_label is null, check that the GeoJSON path is correct and the label field exists."
     })
 
 @app.route("/debug/district")
@@ -260,14 +221,9 @@ def api_vote_map():
 
 @app.route("/api/lookup-legislators")
 def api_lookup_legislators():
-    # Supports address OR lat/lon passthrough
     addr = request.args.get("address")
     lat = request.args.get("lat")
     lon = request.args.get("lon")
-
-    latf: Optional[float] = None
-    lonf: Optional[float] = None
-    geocode_raw: Optional[Dict[str, Any]] = None
 
     if addr:
         try:
@@ -277,28 +233,24 @@ def api_lookup_legislators():
     elif lat and lon:
         try:
             latf = float(lat); lonf = float(lon)
+            geocode_raw = None
         except Exception:
             return jsonify({"success": False, "error": "invalid lat/lon"}), 400
     else:
         return jsonify({"success": False, "error": "provide address or lat/lon"}), 400
 
-    # IMPORTANT:
-    # If you already have working base-district detection elsewhere in your codebase,
-    # replace the placeholder below with that logic. For now, we accept an explicit
-    # district ?label= in the query to keep end-to-end fetch testable under rate limits.
-    label = request.args.get("label")
-    if not label:
-        # Placeholder: require label until shapefile/label-probe is re-integrated.
-        # This ensures we can still test OpenStates + floterial overlay path.
+    match = DISTRICTS.find(latf, lonf)
+    if not match:
         return jsonify({
             "success": True,
             "formattedAddress": geocode_raw.get("display_name") if geocode_raw else None,
             "lat": latf, "lon": lonf,
             "stateRepresentatives": [],
-            "note": "Base-district lookup not executed in this minimal patch. Call /debug/district?label=… (e.g., Sullivan 2) or pass &label=Sullivan%202 here while we finalize shapefile/probe integration."
+            "note": "No base district found in GeoJSON (check data/nh_house_districts.geojson)."
         })
+    base_label, props = match
 
-    payload = os_people_by_district(label)
+    payload = os_people_by_district(base_label)
     if "error" in payload:
         status = 429 if payload.get("status") == 429 else 502
         return jsonify({"success": False, "error": payload, "stateRepresentatives": []}), status
@@ -308,10 +260,9 @@ def api_lookup_legislators():
         "success": True,
         "formattedAddress": geocode_raw.get("display_name") if geocode_raw else None,
         "lat": latf, "lon": lonf,
-        "district": label,
+        "district": base_label,
         "stateRepresentatives": reps
     })
 
-# -------------- main ---------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
