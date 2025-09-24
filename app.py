@@ -1,16 +1,21 @@
-import os
-import time
-import json
-import csv
+import os, time, json, csv, requests
 from functools import lru_cache
 from typing import Dict, Any, List, Tuple, Optional
 from flask import Flask, jsonify, request
-import requests
+from flask_cors import CORS  # NEW
 
 from utils.geocode import geocode_address, GeocodeError
-from utils.districts import DistrictIndex  # NEW
+from utils.districts import DistrictIndex
 
 app = Flask(__name__)
+
+# ---- CORS ----
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*")
+if ALLOWED_ORIGINS.strip() == "*" or ALLOWED_ORIGINS.strip() == "":
+    CORS(app)  # allow all
+else:
+    origins = [o.strip() for o in ALLOWED_ORIGINS.split(",") if o.strip()]
+    CORS(app, resources={r"/*": {"origins": origins}})
 
 # ---------- Config ----------
 OPENSTATES_API_KEY = os.getenv("OPENSTATES_API_KEY", "")
@@ -28,9 +33,7 @@ OS_MIN_DELAY_MS = int(os.getenv("OS_MIN_DELAY_MS", "350"))
 OS_TTL_SECONDS  = int(os.getenv("OS_TTL_SECONDS", "180"))
 
 RENDER_COMMIT   = os.getenv("RENDER_GIT_COMMIT", "")
-
-# GeoJSON path (we just committed this)
-HOUSE_GEOJSON_PATH = os.getenv("HOUSE_GEOJSON_PATH", "data/nh_house_districts.geojson")
+HOUSE_GEOJSON_PATH = os.getenv("HOUSE_GEOJSON_PATH", "data/nh_house_districts.json")
 
 # ---------- OpenStates ----------
 OS_BASE = "https://v3.openstates.org"
@@ -58,10 +61,12 @@ def _os_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
 
 @lru_cache(maxsize=2048)
 def os_people_by_district(label: str) -> Dict[str, Any]:
-    return _os_get(
-        "/people",
-        {"jurisdiction": "New Hampshire", "chamber": "lower", "district": label, "per_page": 50},
-    )
+    return _os_get("/people", {
+        "jurisdiction": "New Hampshire",
+        "chamber": "lower",
+        "district": label,
+        "per_page": 50,
+    })
 
 def _extract_people(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     if "error" in payload:
@@ -87,9 +92,7 @@ def _read_csv_from(url_or_path: Optional[str], fallback_path: str) -> Tuple[List
         real = path
     else:
         real = fallback_path
-
-    headers: List[str] = []
-    rows: List[List[str]] = []
+    headers: List[str] = []; rows: List[List[str]] = []
     try:
         with open(real, newline="", encoding="utf-8-sig") as f:
             reader = csv.reader(f)
@@ -110,31 +113,26 @@ def _read_csv_from(url_or_path: Optional[str], fallback_path: str) -> Tuple[List
         pass
     return headers, rows
 
-def _norm(h: str) -> str:
-    return h.strip().lower().replace(" ", "_")
-
+def _norm(h: str) -> str: return h.strip().lower().replace(" ", "_")
 def _pick_cols(headers: List[str]) -> Tuple[Optional[int], Optional[int]]:
     key_idx = val_idx = None
     for i, h in enumerate(headers):
         hn = _norm(h)
-        if hn in ("base", "base_district", "base_label"): key_idx = i
-        if hn in ("floterial", "overlay", "floterial_label", "floterial_district"): val_idx = i
+        if hn in ("base","base_district","base_label"): key_idx = i
+        if hn in ("floterial","overlay","floterial_label","floterial_district"): val_idx = i
     return key_idx, val_idx
 
 def _group_sample(headers: List[str], rows: List[List[str]]) -> Dict[str, List[str]]:
     out: Dict[str, List[str]] = {}
-    if not headers:
-        return out
+    if not headers: return out
     key_idx, val_idx = _pick_cols(headers)
-    if key_idx is None or val_idx is None:
-        return out
+    if key_idx is None or val_idx is None: return out
     for r in rows[:50]:
         if len(r) <= max(key_idx, val_idx): continue
         base = r[key_idx].strip(); flo = r[val_idx].strip()
         if base and flo:
             out.setdefault(base, [])
-            if flo not in out[base]:
-                out[base].append(flo)
+            if flo not in out[base]: out[base].append(flo)
     return out
 
 def _csv_counts() -> Dict[str, Any]:
@@ -150,13 +148,12 @@ def _csv_counts() -> Dict[str, Any]:
         "sample_by_town": dict(list(_group_sample(by_town_h, by_town_r).items())[:3]),
     }
 
-# ---------- Load GeoJSON once ----------
+# ---------- Districts (GeoJSON) ----------
 DISTRICTS = DistrictIndex.from_geojson_path(HOUSE_GEOJSON_PATH)
 
 # ================== ROUTES ==================
 @app.route("/health")
 def health():
-    csv_info = _csv_counts()
     return jsonify({
         "ok": True,
         "env": {
@@ -165,8 +162,9 @@ def health():
             "os_min_delay_ms": OS_MIN_DELAY_MS,
             "os_ttl_seconds": OS_TTL_SECONDS,
             "house_geojson": HOUSE_GEOJSON_PATH,
+            "allowed_origins": ALLOWED_ORIGINS,
         },
-        "csv": csv_info,
+        "csv": _csv_counts(),
         "commit": RENDER_COMMIT,
     })
 
@@ -193,16 +191,14 @@ def debug_trace():
         lat, lon, raw = geocode_address(addr, email=NOMINATIM_EMAIL)
     except GeocodeError as e:
         return jsonify({"ok": False, "error": f"geocode_failed: {e}"}), 502
-
-    found = DISTRICTS.find(lat, lon)
-    base_label = found[0] if found else None
+    match = DISTRICTS.find(lat, lon)
+    base_label = match[0] if match else None
     return jsonify({
         "ok": True,
         "inputAddress": addr,
         "lat": lat, "lon": lon,
         "geocode": raw,
         "base_district_label": base_label,
-        "note": "If base_district_label is null, check that the GeoJSON path is correct and the label field exists."
     })
 
 @app.route("/debug/district")
@@ -217,7 +213,8 @@ def debug_district():
 
 @app.route("/api/vote-map")
 def api_vote_map():
-    return jsonify(_load_votes())
+    # lightweight passthrough for now
+    return jsonify({"ok": True})
 
 @app.route("/api/lookup-legislators")
 def api_lookup_legislators():
@@ -232,8 +229,7 @@ def api_lookup_legislators():
             return jsonify({"success": False, "error": f"geocode_failed: {e}", "stateRepresentatives": []}), 502
     elif lat and lon:
         try:
-            latf = float(lat); lonf = float(lon)
-            geocode_raw = None
+            latf = float(lat); lonf = float(lon); geocode_raw = None
         except Exception:
             return jsonify({"success": False, "error": "invalid lat/lon"}), 400
     else:
@@ -246,10 +242,10 @@ def api_lookup_legislators():
             "formattedAddress": geocode_raw.get("display_name") if geocode_raw else None,
             "lat": latf, "lon": lonf,
             "stateRepresentatives": [],
-            "note": "No base district found in GeoJSON (check data/nh_house_districts.geojson)."
+            "note": "No base district found in GeoJSON."
         })
-    base_label, props = match
 
+    base_label, _props = match
     payload = os_people_by_district(base_label)
     if "error" in payload:
         status = 429 if payload.get("status") == 429 else 502
