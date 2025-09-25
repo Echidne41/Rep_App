@@ -1,31 +1,35 @@
-import sys, csv, os
+#!/usr/bin/env python3
+import sys, os, csv, re
 
-FILES = ["floterial_by_base.csv", "floterial_by_town.csv"]
-REQUIRED_BASE = {"district","rep_name","openstates_id"}
-REQUIRED_TOWN = {"town","county","floterial"}
+# ---- what each CSV must contain (any one of these header-sets is OK) ----
+RULES = {
+    # Your file: base_district + floterial_district (or legacy/alt names)
+    "floterial_by_base.csv": [
+        {"base_district", "floterial_district"},
+        {"base_label", "floterials"},
+        {"base", "floterials"},
+        {"base", "floterial_district"},
+        {"base_label", "floterial_district"},
+    ],
+    # Town mapping (county optional if you ever drop it)
+    "floterial_by_town.csv": [
+        {"town", "county", "district"},
+        {"town", "district"},
+        {"town", "county", "floterials"},
+        {"town", "floterial_district"},
+    ],
+    # Roster of OS person IDs
+    "nh_house_ids.csv": [
+        {"openstates_person_id", "name", "district"},
+        {"openstates_id", "name", "district"},
+        {"person_id", "name", "district"},
+        {"openstates_person_id", "rep_name", "district"},
+        {"openstates_person_id", "name", "district_label"},
+    ],
+}
 
-def check(path, required):
-    with open(path, newline='', encoding='utf-8') as f:
-        r = csv.DictReader(f)
-        missing = required - set(r.fieldnames or [])
-        assert not missing, f"{path}: missing headers {missing}"
-        for i,row in enumerate(r, start=2):
-            for k in required:
-                assert (row.get(k) or "").strip(), f"{path}:{i} empty {k}"
-            if "openstates_id" in row and row["openstates_id"]:
-                assert row["openstates_id"].startswith("ocd-person/"), f"{path}:{i} bad OpenStates ID"
-
-def main():
-    root = os.getcwd()
-    for fname in FILES:
-        path = os.path.join(root, fname)
-        if os.path.exists(path):
-            if fname == "floterial_by_town.csv":
-                check(path, REQUIRED_TOWN)
-            else:
-                check(path, REQUIRED_BASE)
-            print(f"{fname}: OK")
-        else:
-            print(f"{fname}: not present, skipped")
-if __name__ == "__main__":
-    main()
+def norm(s: str) -> str:
+    """lowercase, strip BOM/space/punct so 'openstates_person_id' == 'OpenStates Person ID'."""
+    if s is None: return ""
+    s = s.replace("\ufeff", "").strip().lower()
+    s = re.sub(r"[^a-z0-9]+", "", s)  # drop spaces/
