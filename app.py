@@ -1,12 +1,13 @@
-import os, time, json, csv, io, re, requests, signal
+import os, time, csv, io, re, requests, signal
 from typing import Dict, Any, List, Tuple, Optional
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
+# ----- local utils (your repo) -----
 from utils.geocode import geocode_address, GeocodeError
 from utils.districts import DistrictIndex  # SU2 -> "Sullivan 2" normalization
 
-# ---------------- Flask & CORS ----------------
+# ===================== Flask & CORS =====================
 app = Flask(__name__)
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").strip()
 if ALLOWED_ORIGINS in ("", "*"):
@@ -15,12 +16,11 @@ else:
     origins = [o.strip() for o in ALLOWED_ORIGINS.split(",") if o.strip()]
     CORS(app, resources={r"/*": {"origins": origins}}, supports_credentials=False)
 
-# root route so Render health probe never hangs
 @app.route("/")
 def index():
-    return "OK", 200
+    return "OK", 200  # Render health probe
 
-# ---------------- Env / Config ----------------
+# ===================== Env / Config =====================
 OPENSTATES_API_KEY    = os.getenv("OPENSTATES_API_KEY", "")
 NOMINATIM_EMAIL       = os.getenv("NOMINATIM_EMAIL", "rep-app@yourorg.org")
 
@@ -29,17 +29,17 @@ FLOTERIAL_TOWN_CSV_URL = os.getenv("FLOTERIAL_TOWN_CSV_URL")
 FLOTERIAL_BY_BASE_PATH = os.getenv("FLOTERIAL_BY_BASE_PATH", "floterial_by_base.csv")
 FLOTERIAL_MAP_PATH     = os.getenv("FLOTERIAL_MAP_PATH", "floterial_by_town.csv")
 
-# Votes: prefer env URL, else use local file in repo root
+# Votes: prefer env URL, else local file in repo root
 VOTES_CSV_URL     = (os.getenv("VOTES_CSV_URL") or "").strip().strip("'\"")
 VOTES_TTL_SECONDS = int(os.getenv("VOTES_TTL_SECONDS", os.getenv("OS_TTL_SECONDS", "300")))
 
 OS_MIN_DELAY_MS = int(os.getenv("OS_MIN_DELAY_MS", "350"))
-OS_TTL_SECONDS  = int(os.getenv("OS_TTL_SECONDS", "180"))  # also people-cache TTL
+OS_TTL_SECONDS  = int(os.getenv("OS_TTL_SECONDS", "180"))  # people cache
 
 RENDER_COMMIT      = os.getenv("RENDER_GIT_COMMIT", "")
 HOUSE_GEOJSON_PATH = os.getenv("HOUSE_GEOJSON_PATH", "data/nh_house_districts.json")
 
-# ---------------- OpenStates client ----------------
+# ===================== OpenStates client =====================
 OS_BASE = "https://v3.openstates.org"
 _last_call_ts = 0.0
 _os_people_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
@@ -59,12 +59,10 @@ def _os_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
     _os_throttle()
     headers = {"X-API-Key": OPENSTATES_API_KEY, "Accept": "application/json"}
     try:
-        # 8s hard HTTP timeout so requests can't hang the worker
-        r = requests.get(f"{OS_BASE}{path}", params=params, headers=headers, timeout=8)
+        r = requests.get(f"{OS_BASE}{path}", params=params, headers=headers, timeout=8)  # 8s HTTP
     except requests.RequestException as e:
         return {"error": "transport", "status": 502, "detail": str(e)[:200]}
     if r.status_code == 429:
-        time.sleep(min(1.0 + (time.time() % 0.5), 2.0))  # tiny jittered backoff
         return {"error": "rate_limited", "status": 429, "detail": r.text[:200]}
     if r.status_code >= 400:
         return {"error": "upstream", "status": r.status_code, "detail": r.text[:200]}
@@ -84,7 +82,6 @@ def os_people_by_district(label: str) -> Dict[str, Any]:
             if now - ts < OS_TTL_SECONDS:
                 return payload
             _os_people_cache.pop(key, None)
-
     payload = _os_get("/people", {
         "jurisdiction": "New Hampshire",
         "chamber": "lower",
@@ -113,7 +110,7 @@ def _extract_people(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         })
     return out
 
-# ---------------- CSV helpers (floterials) ----------------
+# ===================== CSV helpers (floterials) =====================
 def _read_csv_from(url_or_path: Optional[str], fallback_path: str) -> Tuple[List[str], List[List[str]]]:
     path = (url_or_path or "").strip()
     if path.startswith("file:///"):
@@ -144,12 +141,12 @@ def _read_csv_from(url_or_path: Optional[str], fallback_path: str) -> Tuple[List
         pass
     return headers, rows
 
-def _norm(h: str) -> str: return h.strip().lower().replace(" ", "_")
+def _h_norm(h: str) -> str: return h.strip().lower().replace(" ", "_")
 
 def _pick_cols(headers: List[str]) -> Tuple[Optional[int], Optional[int]]:
     key_idx = val_idx = None
     for i, h in enumerate(headers):
-        hn = _norm(h)
+        hn = _h_norm(h)
         if hn in ("base","base_district","base_label"): key_idx = i
         if hn in ("floterial","overlay","floterial_label","floterial_district"): val_idx = i
     return key_idx, val_idx
@@ -180,8 +177,7 @@ def _csv_counts() -> Dict[str, Any]:
         "sample_by_town": dict(list(_group_sample(by_town_h, by_town_r).items())[:3]),
     }
 
-# ---------------- Votes (local CSV or URL) ----------------
-# Cache + parsing compatible with your old working version
+# ===================== Votes (CSV URL or local file) =====================
 _VOTES_CACHE = {"t": 0, "rows": [], "src": ""}
 
 def _votes_csv_url() -> str:
@@ -245,13 +241,30 @@ def _district_equiv(a: str, b: str) -> bool:
     if not aletters or not bletters: return True
     return aletters[:3] == bletters[:3]
 
+def _bill_key(s: str) -> str:
+    m = re.search(r"(HB|SB|HR|HCR|SCR)\s*[-_ ]?\s*(\d{1,4})(?:.*?(\d{4}))?", str(s or ""), re.I)
+    if m:
+        code = f"{m.group(1).upper()}{m.group(2)}"
+        return f"{code}_{m.group(3)}" if m.group(3) else code
+    return str(s or "").strip()
+
+def _canon_vote_value(v: str) -> str:
+    s = _nrm(v)
+    if s in {"y","yes","yea","aye","support","supported","for","pro","infavor","affirmative"}:
+        return "For"
+    if s in {"n","no","nay","oppose","opposed","against","con"}:
+        return "Against"
+    if s in {"present","abstain","abstained","excused","nv","notvoting","recused"}:
+        return "Other"
+    return (v or "").strip()
+
 def _match_row_for_rep(rows, *, person_id: str = "", name: str = "", district: str = "") -> Optional[dict]:
-    # by person id
+    # 1) by OpenStates ID
     for r in rows:
         col = _pick_col(r, ["openstates_person_id","openstates_id","person_id","openstates id","os id"])
         if col and person_id and (r.get(col) or "").strip() == person_id:
             return r
-    # by name (and district if available)
+    # 2) fallback by name (+ district if provided)
     name_hits: List[dict] = []
     name_n = _nrm(name); dist_n = _nrm(district)
     for r in rows:
@@ -268,7 +281,7 @@ def _match_row_for_rep(rows, *, person_id: str = "", name: str = "", district: s
                 return r
     return name_hits[0] if len(name_hits) == 1 else None
 
-def _row_to_vote_list(row: dict) -> List[dict]:
+def _row_to_vote_list_wide(row: dict) -> List[dict]:
     if not row: return []
     meta = {
         "openstates_person_id","openstates_id","person_id","os id",
@@ -281,26 +294,52 @@ def _row_to_vote_list(row: dict) -> List[dict]:
     for k, v in (row or {}).items():
         if not k or _nrm(k) in meta_norm: continue
         if v is None or str(v).strip() == "": continue
-        votes.append({"bill": k.strip(), "vote": str(v).strip()})
+        votes.append({"bill": _bill_key(k), "vote": _canon_vote_value(str(v))})
     return votes
 
-# ---------------- District polygons ----------------
+def _collect_votes_for_rep(rows, *, person_id: str = "", name: str = "", district: str = "") -> Tuple[List[dict], Optional[dict]]:
+    """Supports wide (multi-bill columns) and long (bill,vote) CSV."""
+    def has_long_keys(r): 
+        return bool(_pick_col(r, ["bill"])) and bool(_pick_col(r, ["vote"]))
+    is_long = any(has_long_keys(r) for r in rows) if rows else False
+
+    if not is_long:
+        row = _match_row_for_rep(rows, person_id=person_id, name=name, district=district)
+        return _row_to_vote_list_wide(row), row
+
+    # long format: aggregate multiple rows
+    out: Dict[str, str] = {}
+    first_row: Optional[dict] = None
+    for r in rows:
+        idcol = _pick_col(r, ["openstates_person_id","openstates_id","person_id","openstates id","os id"])
+        namecol = _pick_col(r, ["name","full name","representative","representative name","member","rep"])
+        distcol = _pick_col(r, ["district","district label","house district","state house district","sldl","sldl name","sldl label"])
+        id_match  = bool(person_id and idcol and (r.get(idcol) or "").strip() == person_id)
+        name_match= bool(name and namecol and _nrm(r.get(namecol,"")) == _nrm(name))
+        dist_match= bool(district and distcol and _district_equiv(r.get(distcol,""), district))
+        if id_match or (name_match and (not district or dist_match)):
+            bcol = _pick_col(r, ["bill"]); vcol = _pick_col(r, ["vote"])
+            if bcol and vcol:
+                first_row = first_row or r
+                out[_bill_key(r.get(bcol,""))] = _canon_vote_value(str(r.get(vcol,"")))
+    votes = [{"bill": k, "vote": v} for k, v in sorted(out.items())]
+    return votes, first_row
+
+# ===================== District polygons =====================
 DISTRICTS = DistrictIndex.from_geojson_path(HOUSE_GEOJSON_PATH)
 
-# ---------------- Inline hard-timeout helper ----------------
+# ===================== Hard route timeout (SIGALRM) =====================
 class TimeoutException(Exception): ...
 def run_with_alarm(seconds: int, fn):
-    """Run fn() with SIGALRM cutoff; return result or raise TimeoutException."""
     def handler(signum, frame): raise TimeoutException()
     old = signal.signal(signal.SIGALRM, handler)
     signal.alarm(seconds)
     try:
         return fn()
     finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old)
+        signal.alarm(0); signal.signal(signal.SIGALRM, old)
 
-# ---------------- Routes ----------------
+# ===================== Routes =====================
 @app.route("/health")
 def health():
     return jsonify({
@@ -320,7 +359,7 @@ def health():
 
 @app.route("/debug/trace")
 def debug_trace():
-    addr = request.args.get("address", "").strip()
+    addr = (request.args.get("address") or "").strip()
     if not addr:
         return jsonify({"ok": False, "error": "Missing address"}), 400
     try:
@@ -330,9 +369,7 @@ def debug_trace():
     match = DISTRICTS.find(lat, lon)
     base_label = match[0] if match else None
     return jsonify({
-        "ok": True, "inputAddress": addr,
-        "lat": lat, "lon": lon,
-        "geocode": raw,
+        "ok": True, "inputAddress": addr, "lat": lat, "lon": lon, "geocode": raw,
         "base_district_label": base_label,
     })
 
@@ -349,61 +386,68 @@ def debug_district():
         return jsonify({"ok": False, **payload}), 429 if payload.get("status") == 429 else 502
     return jsonify({"ok": True, "district": label, "people": _extract_people(payload)})
 
+@app.route("/debug/votes-preview")
+def debug_votes_preview():
+    rows, err = _fetch_votes_rows(force_refresh=True)
+    if err:
+        return {"error": err}, 400
+    # show first row and detected schema kind
+    def has_long(r): return bool(_pick_col(r, ["bill"])) and bool(_pick_col(r, ["vote"]))
+    kind = "long" if rows and has_long(rows[0]) else "wide"
+    return {"using": _VOTES_CACHE.get("src",""), "schema": kind, "row0": rows[0] if rows else None}, 200
+
+@app.route("/debug/votes-audit")
+def debug_votes_audit():
+    name = (request.args.get("name") or "").strip()
+    district = (request.args.get("district") or "").strip()
+    pid = (request.args.get("person_id") or "").strip()
+    rows, err = _fetch_votes_rows(force_refresh=True)
+    if err:
+        return {"error": err}, 400
+    votes, row = _collect_votes_for_rep(rows, person_id=pid, name=name, district=district)
+    return {
+        "person_id": pid or None, "name": name or None, "district": district or None,
+        "matched": bool(row) or bool(votes),
+        "using": _VOTES_CACHE.get("src",""),
+        "votes_count": len(votes),
+        "row_keys": list(row.keys()) if row else [],
+    }, 200
+
 @app.route("/api/lookup-legislators")
 def api_lookup_legislators():
-    addr = request.args.get("address")
-    lat  = request.args.get("lat")
-    lon  = request.args.get("lon")
-
-    latf: Optional[float] = None
-    lonf: Optional[float] = None
-    geocode_raw: Optional[Dict[str, Any]] = None
-
+    addr = request.args.get("address"); lat = request.args.get("lat"); lon = request.args.get("lon")
+    latf = lonf = None; geocode_raw: Optional[Dict[str, Any]] = None
     if addr:
         try:
             latf, lonf, geocode_raw = geocode_address(addr, email=NOMINATIM_EMAIL)
         except GeocodeError as e:
             return jsonify({"success": False, "error": f"geocode_failed: {e}", "stateRepresentatives": []}), 502
     elif lat and lon:
-        try:
-            latf = float(lat); lonf = float(lon)
-        except Exception:
-            return jsonify({"success": False, "error": "invalid lat/lon"}), 400
+        try: latf = float(lat); lonf = float(lon)
+        except Exception: return jsonify({"success": False, "error": "invalid lat/lon"}), 400
     else:
         return jsonify({"success": False, "error": "provide address or lat/lon"}), 400
 
-    # base district via polygons
     match = DISTRICTS.find(latf, lonf)
     if not match:
-        return jsonify({
-            "success": True,
-            "formattedAddress": geocode_raw.get("display_name") if geocode_raw else None,
-            "lat": latf, "lon": lonf,
-            "stateRepresentatives": [],
-            "note": "No base district found in GeoJSON."
-        })
+        return jsonify({"success": True, "formattedAddress": geocode_raw.get("display_name") if geocode_raw else None,
+                        "lat": latf, "lon": lonf, "stateRepresentatives": [],
+                        "note": "No base district found in GeoJSON."})
     base_label, _props = match
 
-    # OpenStates with hard 12s cutoff
     try:
         payload = run_with_alarm(12, lambda: os_people_by_district(base_label))
     except TimeoutException:
         return jsonify({"success": False, "error": "OpenStates timeout", "stateRepresentatives": []}), 504
-
     if "error" in payload:
         status = 429 if payload.get("status") == 429 else 502
         return jsonify({"success": False, "error": payload, "stateRepresentatives": []}), status
 
     reps = _extract_people(payload)
-    return jsonify({
-        "success": True,
-        "formattedAddress": geocode_raw.get("display_name") if geocode_raw else None,
-        "lat": latf, "lon": lonf,
-        "district": base_label,
-        "stateRepresentatives": reps
-    })
+    return jsonify({"success": True, "formattedAddress": geocode_raw.get("display_name") if geocode_raw else None,
+                    "lat": latf, "lon": lonf, "district": base_label, "stateRepresentatives": reps})
 
-# ---------- restored votes endpoints ----------
+# ---------- votes endpoints ----------
 @app.get("/api/key-votes")
 def api_key_votes():
     person_id = (request.args.get("person_id") or "").strip()
@@ -415,21 +459,20 @@ def api_key_votes():
     if err:
         return jsonify({"success": False, "error": {"message": err}}), 400
 
-    row = _match_row_for_rep(rows, person_id=person_id, name=name, district=district)
-    votes = _row_to_vote_list(row) if row else []
+    votes, a_row = _collect_votes_for_rep(rows, person_id=person_id, name=name, district=district)
+    # Backfill rep fields from CSV if caller omitted them
+    if a_row:
+        if not name:
+            ncol = _pick_col(a_row, ["name","full name","representative","representative name","member","rep"])
+            name = (a_row.get(ncol) if ncol else name) or name
+        if not district:
+            dcol = _pick_col(a_row, ["district","district label","house district","state house district","sldl","sldl name","sldl label"])
+            district = (a_row.get(dcol) if dcol else district) or district
 
-    return jsonify({
-        "success": True,
-        "data": {
-            "matched": bool(row),
-            "rep": {
-                "person_id": person_id or (row.get("openstates_person_id") if row else None),
-                "name": name or (row.get("name") or row.get("Representative") if row else None),
-                "district": district or (row.get("district") or row.get("District") if row else None),
-            },
-            "votes": votes
-        }
-    })
+    return jsonify({"success": True,
+                    "data": {"matched": bool(a_row) or bool(votes),
+                             "rep": {"person_id": person_id or None, "name": name or None, "district": district or None},
+                             "votes": votes}})
 
 @app.get("/api/lookup-with-votes")
 def api_lookup_with_votes():
@@ -438,12 +481,11 @@ def api_lookup_with_votes():
     if not addr:
         return jsonify({"success": False, "error": {"message": "Missing address"}}), 400
 
-    # reuse existing lookup
+    # Base lookup
     base_resp = api_lookup_legislators()
     if isinstance(base_resp, tuple):
         resp, status = base_resp
-        if status != 200:
-            return base_resp
+        if status != 200: return base_resp
         data = resp.get_json()
     else:
         data = base_resp.get_json()
@@ -454,19 +496,18 @@ def api_lookup_with_votes():
     if err:
         return jsonify({**data, "votesError": err, "votesSource": votes_src})
 
-    # attach votes by id/name+district
     out_reps = []
     for r in reps:
         pid = r.get("id") or ""
         nm  = r.get("name") or ""
         dist= r.get("district") or ""
-        row = _match_row_for_rep(rows, person_id=pid, name=nm, district=dist)
-        r2 = {**r, "votes": _row_to_vote_list(row) if row else []}
-        out_reps.append(r2)
+        votes, _ = _collect_votes_for_rep(rows, person_id=pid, name=nm, district=dist)
+        out_reps.append({**r, "votes": votes})
 
     data["stateRepresentatives"] = out_reps
     data["votesSource"] = votes_src
     return jsonify(data)
 
+# ===================== main =====================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
