@@ -17,7 +17,7 @@ try:
 except Exception:
     pass
 
-OPENSTATES_API_KEY = os.getenv("OPENSTATES_API_KEY", "")
+OPENSTATES_API_KEY = os.getenv("OPENSTATES_API_KEY", "").strip()
 
 OS_ROOT = "https://v3.openstates.org"
 OS_PEOPLE = f"{OS_ROOT}/people"
@@ -30,20 +30,20 @@ PROBE_STEP_DEG  = float(os.getenv("PROBE_STEP_DEG", "0.01"))
 PROBE_MAX_RINGS = int(os.getenv("PROBE_MAX_RINGS", "2"))
 
 # Votes sheet config
-VOTES_GSHEET_DOC_ID = os.getenv("VOTES_GSHEET_DOC_ID", "")
-VOTES_GSHEET_GID   = os.getenv("VOTES_GSHEET_GID", "")
-VOTES_SHEET_NAME   = os.getenv("VOTES_SHEET_NAME", "House Key Votes")
-# sanitize env (strip whitespace & quotes)
+VOTES_GSHEET_DOC_ID = (os.getenv("VOTES_GSHEET_DOC_ID", "") or "").strip()
+VOTES_GSHEET_GID   = (os.getenv("VOTES_GSHEET_GID", "") or "").strip()
+VOTES_SHEET_NAME   = (os.getenv("VOTES_SHEET_NAME", "House Key Votes") or "").strip()
+# prefer explicit CSV; fallback to local file
 VOTES_CSV_URL      = (os.getenv("VOTES_CSV_URL", "") or "").strip().strip("'\"")
-VOTES_TTL          = int(os.getenv("VOTES_TTL_SECONDS", "900"))  # seconds
+VOTES_TTL          = int(os.getenv("VOTES_TTL_SECONDS", "900"))
 
 # Floterial CSV mapping
-FLOTERIAL_MAP_PATH = os.getenv("FLOTERIAL_MAP_PATH", "floterial_by_town.csv")          # Town -> [District,...]
-FLOTERIAL_BY_BASE_PATH = os.getenv("FLOTERIAL_BY_BASE_PATH", "floterial_by_base.csv")  # BaseLabel -> [District,...]
+FLOTERIAL_MAP_PATH = os.getenv("FLOTERIAL_MAP_PATH", "floterial_by_town.csv")
+FLOTERIAL_BY_BASE_PATH = os.getenv("FLOTERIAL_BY_BASE_PATH", "floterial_by_base.csv")
 
 # Geocoder fallback
 NOMINATIM_FALLBACK = (os.getenv("NOMINATIM_FALLBACK", "1") or "1").strip().lower() in ("1","true","yes")
-NOMINATIM_EMAIL    = os.getenv("NOMINATIM_EMAIL","")  # TODO: your email (optional)
+NOMINATIM_EMAIL    = os.getenv("NOMINATIM_EMAIL","")
 
 # Caches
 PROBE_CACHE: Dict[str, Any] = {}
@@ -190,7 +190,6 @@ def fetch_people_by_district(district: str) -> Tuple[List[dict], Optional[str]]:
         return [], err
     return (data or {}).get("results") or [], None
 
-# Retry helper for floterials (handles intermittent failures)
 def _fetch_district_retry(label: str, retries: int = 3, delay: float = 4.0) -> List[dict]:
     for i in range(retries + 1):
         data, err = fetch_people_by_district(label)
@@ -230,7 +229,10 @@ def _ingest(collected: Dict[str, dict], results: List[dict]) -> None:
             emails.append(p["email"])
         emails = [e for e in emails if e]
 
-        links = [{"url": l["url"]} for l in (p.get("links") or []) if isinstance(l, dict) and l.get("url")]
+        links = []
+        for l in (p.get("links") or []):
+            if isinstance(l, dict) and l.get("url"):
+                links.append({"url": l["url"]})
 
         if pid not in collected:
             collected[pid] = {
@@ -257,7 +259,6 @@ def _neighbors(lat: float, lon: float, start_deg: float, step_deg: float, rings:
 
 def union_people_geo_statewide(lat: float, lon: float, min_nh_lower: int = 2) -> Dict[str, dict]:
     collected: Dict[str, dict] = {}
-
     def probe(y: float, x: float):
         key = f"{round(y,6)},{round(x,6)}"
         if key in PROBE_CACHE:
@@ -295,6 +296,12 @@ def normalize_person(person: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(party, list):
         party = (party[0] or {}).get("name") or "Unknown"
     party = str(party).replace("Democratic", "Democrat")
+
+    links_list = []
+    for l in (person.get("links") or []):
+        if isinstance(l, dict) and l.get("url"):
+            links_list.append({"url": l["url"]})
+
     return {
         "id": person.get("id") or person.get("openstates_id") or person.get("open_states_id"),
         "name": person.get("name"),
@@ -302,14 +309,13 @@ def normalize_person(person: Dict[str, Any]) -> Dict[str, Any]:
         "district": district,
         "email": email,
         "phone": phone,
-        "links": [l.get("url") for l in (person.get("links") or []) if isinstance(l, dict) and l.get("url")],
+        "links": links_list,
     }
 
 # =========================
 # VOTES: GOOGLE SHEETS / CSV
 # =========================
 def _votes_csv_url() -> Optional[str]:
-    # prefer env, else fallback to local file next to app.py
     if VOTES_CSV_URL:
         return VOTES_CSV_URL
     local = os.path.join(os.path.dirname(__file__), "house_key_votes.csv").replace("\\", "/")
@@ -331,11 +337,9 @@ def _alt_csv_urls(primary: str) -> List[str]:
     return [u for u in alts if u and u != primary]
 
 def _http_get_text(url: str) -> Tuple[Optional[str], Optional[str]]:
-    # Local file support (accept file:// or file:///), keep leading '/' on Linux
     if url.lower().startswith("file://"):
         try:
-            p = url[7:]  # drop 'file://', keep rest
-            p = p.strip().strip("'\"")
+            p = url[7:].strip().strip("'\"")
             if os.name != "nt" and not p.startswith("/"):
                 p = "/" + p
             if os.name == "nt":
@@ -452,6 +456,19 @@ def _match_row_for_rep(rows, *, person_id: str = "", name: str = "", district: s
                 return r
     return name_hits[0] if len(name_hits) == 1 else None
 
+# vote label normalization to invariants
+VOTE_MAP = {
+    "y":"For","yes":"For","yea":"For","aye":"For","for":"For","support":"For","approve":"For",
+    "n":"Against","no":"Against","nay":"Against","oppose":"Against","reject":"Against","against":"Against",
+}
+def _norm_vote_label(raw: str) -> str:
+    s = (raw or "").strip().lower()
+    s = re.sub(r"[^a-z]", "", s)
+    if s in VOTE_MAP: return VOTE_MAP[s]
+    if s in {"absent","abstain","abstained","present","excused","nv","novote","didnotvote"}:
+        return "No Vote"
+    return "No Vote"
+
 def _row_to_vote_list(row: dict) -> List[dict]:
     if not row:
         return []
@@ -468,7 +485,7 @@ def _row_to_vote_list(row: dict) -> List[dict]:
             continue
         if v is None or str(v).strip() == "":
             continue
-        votes.append({"bill": k.strip(), "vote": str(v).strip()})
+        votes.append({"bill": k.strip(), "vote": _norm_vote_label(str(v))})
     return votes
 
 # =========================
@@ -476,7 +493,6 @@ def _row_to_vote_list(row: dict) -> List[dict]:
 # =========================
 def _load_town_map(path: str) -> Dict[str, List[str]]:
     out: Dict[str, List[str]] = {}
-    # keep the built-in seed
     for t, d in NH_FLOTERIAL_BY_TOWN_BUILTIN.items():
         out.setdefault(t, []).append(d)
     if not path or not os.path.exists(path):
@@ -485,17 +501,13 @@ def _load_town_map(path: str) -> Dict[str, List[str]]:
         with open(path, "r", encoding="utf-8-sig") as f:
             rdr = csv.DictReader(f)
             for row in rdr:
-                # accept both schemas
                 town = (row.get("town") or row.get("Town") or "").strip().title()
-                county = (row.get("county") or row.get("County") or "").strip().title()
-                # v1: single label column named 'district'
+                # county optional; not required for mapping
                 v1 = (row.get("district") or row.get("District") or "").strip()
-                # v0: legacy 'floterial_district'
                 v0 = (row.get("floterial_district") or row.get("Floterial_District") or "").strip()
                 cell = v1 or v0
                 if not town or not cell:
                     continue
-                # allow semicolon- or comma-separated lists
                 for d in re.split(r"[;,]", cell):
                     d = re.sub(r"\s+", " ", d.strip())
                     if not d:
@@ -515,11 +527,8 @@ def _load_base_map(path: str) -> Dict[str, List[str]]:
         with open(path, "r", encoding="utf-8-sig") as f:
             rdr = csv.DictReader(f)
             for row in rdr:
-                # accept both schemas
                 base = (row.get("base_label") or row.get("base") or row.get("base_district") or "").strip().title()
-                # v1: 'floterials' (semicolon list)
                 v1 = (row.get("floterials") or row.get("floterial") or "").strip()
-                # v0: legacy one-per-row 'floterial_district'
                 v0 = (row.get("floterial_district") or "").strip()
                 cell = v1 or v0
                 if not base or not cell:
@@ -535,7 +544,6 @@ def _load_base_map(path: str) -> Dict[str, List[str]]:
     except Exception:
         pass
     return out
-
 
 FLOTERIAL_MAP_TOWN = _load_town_map(FLOTERIAL_MAP_PATH)
 FLOTERIAL_MAP_BASE = _load_base_map(FLOTERIAL_BY_BASE_PATH)
@@ -605,6 +613,18 @@ def _lookup_core(address: str, *, include_votes: bool = False, refresh_votes: bo
         if not r.get("district") or r["district"] == "Unknown":
             r["district"] = sldl_clean
 
+    county = county_label_from_sldl(sldl_clean)
+    base_data = {
+        "formattedAddress": geo.get("formattedAddress"),
+        "address": geo.get("formattedAddress"),
+        "inputAddress": address,
+        "stateRepresentatives": reps,
+        "geographies": {
+            "sldl": geo.get("sldl"),
+            "town_county": [geo.get("town"), county] if (geo.get("town") or county) else None,
+        },
+    }
+
     # attach votes if requested
     if include_votes:
         rows, verr = _fetch_votes_rows(force_refresh=refresh_votes)
@@ -612,28 +632,17 @@ def _lookup_core(address: str, *, include_votes: bool = False, refresh_votes: bo
             row = None
             if not verr:
                 row = _match_row_for_rep(rows, person_id=r.get("id") or "", name=r.get("name") or "", district=r.get("district") or "")
-            r["votes"] = _row_to_vote_list(row) if row else []
+            r["votes"] = [{"bill": x["bill"], "vote": _norm_vote_label(x["vote"])} for x in (_row_to_vote_list(row) if row else [])]
         return jsonify({
             "success": True,
             "data": {
-                "formattedAddress": geo.get("formattedAddress"),
-                "inputAddress": address,
-                "stateRepresentatives": reps,
-                "geographies": {"sldl": geo.get("sldl")},
+                **base_data,
                 "votesSource": VOTES_CACHE.get("src", ""),
                 "votesError": verr,
             },
         })
 
-    return jsonify({
-        "success": True,
-        "data": {
-            "formattedAddress": geo.get("formattedAddress"),
-            "inputAddress": address,
-            "stateRepresentatives": reps,
-            "geographies": {"sldl": geo.get("sldl")},
-        },
-    })
+    return jsonify({"success": True, "data": base_data})
 
 # =========================
 # ROUTES
@@ -653,7 +662,7 @@ def nh_house_ids_csv():
             "per_page": 50,
             "page": 1
         })
-        if err and "rate limited" in err.lower():
+        if err and "rate limited" in (err or "").lower():
             time.sleep(8)
             data, err = _get(OS_PEOPLE, {
                 "jurisdiction": "New Hampshire",
@@ -727,124 +736,6 @@ def debug_trace():
         "town_overlays": FLOTERIAL_MAP_TOWN.get(geo.get("town") or "", []),
     }, 200
 
-# ==== JSON vote map (long or wide CSV) ====
-import csv, io, os, re, time
-from urllib.parse import urlparse
-import requests
-
-VOTES_CSV_URL = os.getenv("VOTES_CSV_URL", "").strip()
-VOTES_TTL_SECONDS = int(os.getenv("VOTES_TTL_SECONDS", "300"))
-
-_vote_cache = {"t": 0, "rows": [], "columns": []}
-
-def _read_text_from_url(url: str) -> str:
-    if url.startswith("file://"):
-        path = urlparse(url).path
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
-    r = requests.get(url, timeout=15)
-    r.raise_for_status()
-    return r.text
-
-def _parse_csv_text(text: str):
-    rdr = csv.reader(io.StringIO(text))
-    rows = list(rdr)
-    if not rows:
-        return [], []
-    headers = [h.strip() for h in rows[0]]
-    out = []
-    for r in rows[1:]:
-        d = {}
-        for i, h in enumerate(headers):
-            d[h] = r[i] if i < len(r) else ""
-        out.append(d)
-    return headers, out
-
-def _extract_bill_key(s: str) -> str:
-    m = re.search(r"(HB|SB|HR|HCR|SCR)\s*-?\s*(\d{1,4})(?:.*?(\d{4}))?", str(s or ""), re.I)
-    if m:
-        bill = f"{m.group(1).upper()}{m.group(2)}"
-        yr = m.group(3)
-        return f"{bill}_{yr}" if yr else bill
-    return re.sub(r"[^A-Za-z0-9]+", "_", str(s or "")).upper()
-
-def _load_votes_rows_cached():
-    now = time.time()
-    if _vote_cache["t"] and now - _vote_cache["t"] < VOTES_TTL_SECONDS:
-        return _vote_cache["rows"], _vote_cache["columns"]
-    if not VOTES_CSV_URL:
-        return [], []
-    text = _read_text_from_url(VOTES_CSV_URL)
-    headers, rows = _parse_csv_text(text)
-    cols = [h for h in headers if h not in ("openstates_person_id","person_id","id","name","district")]
-    _vote_cache.update({"t": now, "rows": rows, "columns": cols})
-    return rows, cols
-
-def _normkey(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", str(s or "").lower()).strip()
-
-def _build_vote_map(rows):
-    """Return dict: person_key -> { billKey: rawVote }.
-       Supports long (bill/vote) or wide (many bill columns) CSV."""
-    out = {}
-    is_long = any(("bill" in r and "vote" in r) for r in rows)
-
-    if is_long:
-        for r in rows:
-            pid = (r.get("openstates_person_id") or r.get("person_id") or r.get("id") or "").strip()
-            bill = _extract_bill_key(r.get("bill", ""))
-            if not bill:
-                continue
-            val = str(r.get("vote", ""))
-            name_key = _normkey(r.get("name", ""))
-            dist_key = _normkey(r.get("district", ""))
-
-            if pid:
-                out.setdefault(pid, {})[bill] = val
-            if name_key:
-                out.setdefault(f"name:{name_key}", {})[bill] = val
-            out.setdefault(f"nd:{name_key}|{dist_key}", {})[bill] = val
-        return out
-
-    # wide
-    for r in rows:
-        pid = (r.get("openstates_person_id") or r.get("person_id") or r.get("id") or "").strip()
-        row = {}
-        for k, v in r.items():
-            if k in ("openstates_person_id","person_id","id","name","district"):
-                continue
-            row[k] = str(v or "")
-        name_key = _normkey(r.get("name", ""))
-        dist_key = _normkey(r.get("district", ""))
-
-        if pid:
-            out[pid] = row
-        if name_key:
-            out[f"name:{name_key}"] = row
-        out[f"nd:{name_key}|{dist_key}"] = row
-    return out
-
-@app.get("/api/vote-map")
-def api_vote_map():
-    try:
-        rows, cols = _load_votes_rows_cached()
-        vote_map = _build_vote_map(rows)
-        # union of columns from the map (covers long CSV)
-        colset = set()
-        for d in vote_map.values():
-            colset.update(d.keys())
-        for junk in ("openstates_person_id","person_id","id","name","district"):
-            colset.discard(junk)
-        columns = sorted(colset) if colset else cols
-        return jsonify({
-            "columns": columns,
-            "votes": vote_map,
-            "rows": len(rows),
-            "source": VOTES_CSV_URL
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
 @app.get("/debug/district")
 def debug_district():
     label = (request.args.get("label") or "").strip()
@@ -854,45 +745,6 @@ def debug_district():
         p = (r.get("person") if isinstance(r, dict) else None) or r
         names.append(p.get("name"))
     return {"label": label, "count": len(data or []), "names": names, "error": err}, 200
-
-# Votes audit: shows why certain reps didn't match the CSV
-@app.get("/debug/votes-audit")
-def debug_votes_audit():
-    addr = (request.args.get("address") or "").strip()
-    if not addr:
-        return {"error": "address required"}, 400
-    core = _lookup_core(addr, include_votes=False)
-    resp = core[0] if isinstance(core, tuple) else core
-    data = resp.get_json().get("data", {})
-    reps = data.get("stateRepresentatives") or []
-
-    rows, err = _fetch_votes_rows(force_refresh=True)
-    if err:
-        return {"error": err}, 400
-
-    id_cols = {"openstates_person_id","openstates id","openstates_id","person_id","os id"}
-    def csv_has_id(pid: str) -> bool:
-        for r in rows:
-            for k, v in (r or {}).items():
-                if (k or "").strip().lower() in id_cols and (v or "").strip() == pid:
-                    return True
-        return False
-
-    report = []
-    for r in reps:
-        pid = (r.get("id") or "").strip()
-        nm  = (r.get("name") or "").strip()
-        dist= (r.get("district") or "").strip()
-        row = _match_row_for_rep(rows, person_id=pid, name=nm, district=dist)
-        if row:
-            report.append({"id":pid,"name":nm,"district":dist,"matched":True,"votes":len(_row_to_vote_list(row))})
-        else:
-            why = "unknown"
-            if not pid:                why = "rep has no OpenStates id"
-            elif not csv_has_id(pid):  why = "id not found in CSV"
-            else:                      why = "name+district mismatch"
-            report.append({"id":pid,"name":nm,"district":dist,"matched":False,"why":why})
-    return {"address":addr, "using": VOTES_CACHE.get("src",""), "result":report}, 200
 
 @app.get("/api/key-votes")
 def api_key_votes():
@@ -906,7 +758,7 @@ def api_key_votes():
         return jsonify({"success": False, "error": {"message": err}}), 400
 
     row = _match_row_for_rep(rows, person_id=person_id, name=name, district=district)
-    votes = _row_to_vote_list(row) if row else []
+    votes = [{"bill": x["bill"], "vote": _norm_vote_label(x["vote"])} for x in (_row_to_vote_list(row) if row else [])]
 
     return jsonify({
         "success": True,
@@ -935,86 +787,6 @@ def lookup_legislators_get():
     if not addr:
         return jsonify({"success": False, "error": {"message": "Missing address query param"}}), 400
     return _lookup_core(addr)
-# ===== Bill link lookup (OpenStates) =====
-import time, re, os
-import requests
-from flask import request, jsonify
-
-_OS_KEY = os.getenv("OPENSTATES_API_KEY", "").strip()
-_BILL_CACHE = {}  # { key: {url, t} }
-_BILL_TTL = 3600  # 1 hour
-
-def _extract_bill_code_year(s: str):
-    """
-    'HB148', 'HB148_2025', 'HB148 - LGBTQ Rights', 'VOTE_HB148_2025' → ('HB148', '2025' or None)
-    """
-    s = str(s or "")
-    m = re.search(r"(HB|SB|HR|HCR|SCR)\s*[-_ ]?\s*(\d{1,4})(?:.*?(\d{4}))?", s, re.I)
-    if not m:
-        return None, None
-    return f"{m.group(1).upper()}{m.group(2)}", (m.group(3) or None)
-
-def _pick_best_bill_url(item: dict) -> str:
-    # Prefer official sources
-    for src in (item.get("sources") or []):
-        u = src.get("url")
-        if u: return u
-    # Then known “links”
-    for lk in (item.get("links") or []):
-        u = lk.get("url")
-        if u: return u
-    # Fallback to OpenStates page
-    return item.get("openstates_url") or ""
-
-@app.get("/api/bill-link")
-def api_bill_link():
-    if not _OS_KEY:
-        return jsonify({"error": "OPENSTATES_API_KEY not set"}), 500
-
-    bill_param = request.args.get("bill", "")   # e.g. HB148
-    year_param = request.args.get("year", "")   # e.g. 2025 (optional)
-    # also accept raw column labels like "HB148 - LGBTQ Rights"
-    if not bill_param:
-        raw = request.args.get("label", "")
-        bill_param, y = _extract_bill_code_year(raw)
-        if y and not year_param:
-            year_param = y
-
-    bill_code, year = _extract_bill_code_year(bill_param or "")
-    if not bill_code:
-        return jsonify({"error": "bill not parseable"}), 400
-
-    cache_key = f"{bill_code}:{year or ''}"
-    now = time.time()
-    if cache_key in _BILL_CACHE and now - _BILL_CACHE[cache_key]["t"] < _BILL_TTL:
-        return jsonify({"bill": bill_code, "year": year, "url": _BILL_CACHE[cache_key]["url"]})
-
-    # Query OpenStates bills
-    params = {
-        "jurisdiction": "New Hampshire",
-        "q": bill_code.replace(" ", ""),  # HB148
-        "per_page": 3,
-    }
-    if year:
-        params["session"] = year  # OS v3 accepts session strings; year usually works in NH
-
-    r = requests.get(
-        "https://v3.openstates.org/bills",
-        headers={"X-API-KEY": _OS_KEY},
-        params=params,
-        timeout=15,
-    )
-    r.raise_for_status()
-    data = r.json() or {}
-    items = data.get("results") or data.get("data") or []
-
-    if not items:
-        _BILL_CACHE[cache_key] = {"url": "", "t": now}
-        return jsonify({"bill": bill_code, "year": year, "url": ""})  # frontend can hide button if empty
-
-    url = _pick_best_bill_url(items[0]) or ""
-    _BILL_CACHE[cache_key] = {"url": url, "t": now}
-    return jsonify({"bill": bill_code, "year": year, "url": url})
 
 @app.post("/api/lookup-with-votes")
 def lookup_with_votes_post():
@@ -1055,4 +827,3 @@ def root():
 if __name__ == "__main__":
     print(f"OPENSTATES_API_KEY loaded: {bool(OPENSTATES_API_KEY)}")
     app.run(host="127.0.0.1", port=int(os.getenv("PORT", "5000")), debug=True)
-
