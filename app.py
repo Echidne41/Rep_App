@@ -2,6 +2,7 @@ import os, time, json, csv, requests, signal
 from typing import Dict, Any, List, Tuple, Optional
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from functools import wraps  # <-- NEW
 
 from utils.geocode import geocode_address, GeocodeError
 from utils.districts import DistrictIndex  # SU2 -> "Sullivan 2" normalization here
@@ -39,7 +40,6 @@ _last_call_ts = 0.0
 _os_people_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
 def _os_throttle():
-    """Ensure minimum spacing between OpenStates calls."""
     global _last_call_ts
     now = time.time()
     need = OS_MIN_DELAY_MS / 1000.0
@@ -53,14 +53,12 @@ def _os_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": "no_api_key", "status": 500, "detail": "OPENSTATES_API_KEY not set"}
     _os_throttle()
     headers = {"X-API-Key": OPENSTATES_API_KEY, "Accept": "application/json"}
-    # Hard HTTP timeout so requests can't hang the worker
     try:
-        r = requests.get(f"{OS_BASE}{path}", params=params, headers=headers, timeout=8)
+        r = requests.get(f"{OS_BASE}{path}", params=params, headers=headers, timeout=8)  # 8s hard timeout
     except requests.RequestException as e:
         return {"error": "transport", "status": 502, "detail": str(e)[:200]}
     if r.status_code == 429:
-        # small backoff+jitter to reduce stampede
-        time.sleep(min(1.0 + (time.time() % 0.5), 2.0))
+        time.sleep(min(1.0 + (time.time() % 0.5), 2.0))  # small jitter backoff
         return {"error": "rate_limited", "status": 429, "detail": r.text[:200]}
     if r.status_code >= 400:
         return {"error": "upstream", "status": r.status_code, "detail": r.text[:200]}
@@ -70,7 +68,6 @@ def _os_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": "bad_json", "status": 502, "detail": str(e)[:200]}
 
 def os_people_by_district(label: str) -> Dict[str, Any]:
-    """TTL-aware cache. Never cache error payloads."""
     now = time.time()
     key = str(label).strip()
     if OS_TTL_SECONDS > 0:
@@ -87,7 +84,6 @@ def os_people_by_district(label: str) -> Dict[str, Any]:
         "district": key,
         "per_page": 50,
     })
-
     if payload.get("error"):
         _os_people_cache.pop(key, None)
         return payload
@@ -119,8 +115,7 @@ def _read_csv_from(url_or_path: Optional[str], fallback_path: str) -> Tuple[List
         real = path
     else:
         real = fallback_path
-    headers: List[str] = []
-    rows: List[List[str]] = []
+    headers: List[str] = []; rows: List[List[str]] = []
     try:
         with open(real, newline="", encoding="utf-8-sig") as f:
             reader = csv.reader(f)
@@ -147,8 +142,8 @@ def _pick_cols(headers: List[str]) -> Tuple[Optional[int], Optional[int]]:
     key_idx = val_idx = None
     for i, h in enumerate(headers):
         hn = _norm(h)
-        if hn in ("base", "base_district", "base_label"): key_idx = i
-        if hn in ("floterial", "overlay", "floterial_label", "floterial_district"): val_idx = i
+        if hn in ("base","base_district","base_label"): key_idx = i
+        if hn in ("floterial","overlay","floterial_label","floterial_district"): val_idx = i
     return key_idx, val_idx
 
 def _group_sample(headers: List[str], rows: List[List[str]]) -> Dict[str, List[str]]:
@@ -180,12 +175,13 @@ def _csv_counts() -> Dict[str, Any]:
 # ---------------- District polygons ----------------
 DISTRICTS = DistrictIndex.from_geojson_path(HOUSE_GEOJSON_PATH)
 
-# ---------------- Route-timeout helper ----------------
+# ---------------- Route-timeout helper (fixed: preserves function name) ----------------
 class TimeoutException(Exception): ...
 def _with_alarm(seconds: int):
     """Unix-only hard timeout using SIGALRM (works on Render/gunicorn)."""
     def decorator(fn):
-        def wrapper(*args, **kwargs):
+        @wraps(fn)  # <-- critical: keep the original endpoint name
+        def wrapped(*args, **kwargs):
             def handler(signum, frame): raise TimeoutException()
             old = signal.signal(signal.SIGALRM, handler)
             signal.alarm(seconds)
@@ -194,7 +190,7 @@ def _with_alarm(seconds: int):
             finally:
                 signal.alarm(0)
                 signal.signal(signal.SIGALRM, old)
-        return wrapper
+        return wrapped
     return decorator
 
 # ---------------- Routes ----------------
@@ -233,7 +229,7 @@ def debug_trace():
     })
 
 @app.route("/debug/district")
-@_with_alarm(12)  # hard 12s cutoff so worker never hangs
+@_with_alarm(12)
 def debug_district():
     label = request.args.get("label", "").strip()
     if not label:
@@ -247,7 +243,7 @@ def debug_district():
     return jsonify({"ok": True, "district": label, "people": _extract_people(payload)})
 
 @app.route("/api/lookup-legislators")
-@_with_alarm(12)  # hard 12s cutoff
+@_with_alarm(12)
 def api_lookup_legislators():
     addr = request.args.get("address")
     lat  = request.args.get("lat")
@@ -298,6 +294,5 @@ def api_lookup_legislators():
         "stateRepresentatives": reps
     })
 
-# ---------------- Main ----------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
