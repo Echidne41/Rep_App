@@ -1,8 +1,7 @@
-import os, time, json, csv, requests, signal
+import os, time, json, csv, io, re, requests, signal
 from typing import Dict, Any, List, Tuple, Optional
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from functools import wraps
 
 from utils.geocode import geocode_address, GeocodeError
 from utils.districts import DistrictIndex  # SU2 -> "Sullivan 2" normalization
@@ -30,7 +29,8 @@ FLOTERIAL_TOWN_CSV_URL = os.getenv("FLOTERIAL_TOWN_CSV_URL")
 FLOTERIAL_BY_BASE_PATH = os.getenv("FLOTERIAL_BY_BASE_PATH", "floterial_by_base.csv")
 FLOTERIAL_MAP_PATH     = os.getenv("FLOTERIAL_MAP_PATH", "floterial_by_town.csv")
 
-VOTES_CSV_URL     = os.getenv("VOTES_CSV_URL")
+# Votes: prefer env URL, else use local file in repo root
+VOTES_CSV_URL     = (os.getenv("VOTES_CSV_URL") or "").strip().strip("'\"")
 VOTES_TTL_SECONDS = int(os.getenv("VOTES_TTL_SECONDS", os.getenv("OS_TTL_SECONDS", "300")))
 
 OS_MIN_DELAY_MS = int(os.getenv("OS_MIN_DELAY_MS", "350"))
@@ -113,7 +113,7 @@ def _extract_people(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         })
     return out
 
-# ---------------- CSV helpers ----------------
+# ---------------- CSV helpers (floterials) ----------------
 def _read_csv_from(url_or_path: Optional[str], fallback_path: str) -> Tuple[List[str], List[List[str]]]:
     path = (url_or_path or "").strip()
     if path.startswith("file:///"):
@@ -180,6 +180,110 @@ def _csv_counts() -> Dict[str, Any]:
         "sample_by_town": dict(list(_group_sample(by_town_h, by_town_r).items())[:3]),
     }
 
+# ---------------- Votes (local CSV or URL) ----------------
+# Cache + parsing compatible with your old working version
+_VOTES_CACHE = {"t": 0, "rows": [], "src": ""}
+
+def _votes_csv_url() -> str:
+    if VOTES_CSV_URL:
+        return VOTES_CSV_URL
+    local = os.path.join(os.path.dirname(__file__), "house_key_votes.csv").replace("\\", "/")
+    return f"file://{local}"
+
+def _http_get_text(url: str) -> str:
+    if url.lower().startswith("file://"):
+        p = url[7:].strip().strip("'\"")
+        if os.name != "nt" and not p.startswith("/"): p = "/" + p
+        if os.name == "nt":
+            if p.startswith("/"): p = p[1:]
+            p = p.replace("/", "\\")
+        with open(p, "r", encoding="utf-8") as f:
+            return f.read()
+    s = requests.Session()
+    s.headers.update({"User-Agent":"nh-rep-finder/1","Accept":"text/csv, text/plain, */*"})
+    r = s.get(url, timeout=30, allow_redirects=True)
+    r.raise_for_status()
+    return r.text
+
+def _fetch_votes_rows(force_refresh: bool = False):
+    now = time.time()
+    if not force_refresh and _VOTES_CACHE["rows"] and now - _VOTES_CACHE["t"] < VOTES_TTL_SECONDS:
+        return _VOTES_CACHE["rows"], None
+    url = _votes_csv_url()
+    try:
+        text = _http_get_text(url)
+        t = (text or "").lstrip()
+        if t.lower().startswith("<!doctype html") or "<html" in t[:1000].lower():
+            return [], "Votes CSV URL returned HTML"
+        csv.field_size_limit(min((1 << 31) - 1, 10_000_000))
+        rdr = csv.DictReader(io.StringIO(text))
+        rows = [{(k or "").strip(): (v.strip() if isinstance(v, str) else v) for k, v in (row or {}).items()} for row in rdr]
+        _VOTES_CACHE.update({"t": now, "rows": rows, "src": url})
+        return rows, None
+    except Exception as e:
+        return [], f"votes fetch error: {e}"
+
+def _nrm(s: Optional[str]) -> str:
+    if not s: return ""
+    return re.sub(r"\s+", " ", re.sub(r"[^A-Za-z0-9\s]", "", s)).strip().lower()
+
+def _pick_col(row: dict, candidates: List[str]) -> Optional[str]:
+    norm_map = { _nrm(k): k for k in row.keys() if k is not None }
+    for want in candidates:
+        if want in norm_map: return norm_map[want]
+    for nk, original in norm_map.items():
+        for want in candidates:
+            if want in nk: return original
+    return None
+
+def _district_equiv(a: str, b: str) -> bool:
+    an = _nrm(a); bn = _nrm(b)
+    if an == bn: return True
+    ad = re.findall(r"\d+", an); bd = re.findall(r"\d+", bn)
+    if not ad or not bd or ad[0] != bd[0]: return False
+    aletters = re.sub(r"[^a-z]", "", an); bletters = re.sub(r"[^a-z]", "", bn)
+    if not aletters or not bletters: return True
+    return aletters[:3] == bletters[:3]
+
+def _match_row_for_rep(rows, *, person_id: str = "", name: str = "", district: str = "") -> Optional[dict]:
+    # by person id
+    for r in rows:
+        col = _pick_col(r, ["openstates_person_id","openstates_id","person_id","openstates id","os id"])
+        if col and person_id and (r.get(col) or "").strip() == person_id:
+            return r
+    # by name (and district if available)
+    name_hits: List[dict] = []
+    name_n = _nrm(name); dist_n = _nrm(district)
+    for r in rows:
+        ncol = _pick_col(r, ["name","full name","representative","representative name","member","rep"])
+        if not ncol: continue
+        rname_n = _nrm(r.get(ncol, ""))
+        if rname_n == name_n or (name_n and name_n in rname_n):
+            name_hits.append(r)
+    if not name_hits: return None
+    if dist_n:
+        for r in name_hits:
+            dcol = _pick_col(r, ["district","district label","house district","state house district","sldl","sldl name","sldl label"])
+            if dcol and _district_equiv(r.get(dcol, ""), district):
+                return r
+    return name_hits[0] if len(name_hits) == 1 else None
+
+def _row_to_vote_list(row: dict) -> List[dict]:
+    if not row: return []
+    meta = {
+        "openstates_person_id","openstates_id","person_id","os id",
+        "name","full name","representative","representative name","member","rep",
+        "district","district label","house district","state house district",
+        "sldl","sldl name","sldl label","party","town","county"
+    }
+    meta_norm = set(_nrm(x) for x in meta)
+    votes: List[dict] = []
+    for k, v in (row or {}).items():
+        if not k or _nrm(k) in meta_norm: continue
+        if v is None or str(v).strip() == "": continue
+        votes.append({"bill": k.strip(), "vote": str(v).strip()})
+    return votes
+
 # ---------------- District polygons ----------------
 DISTRICTS = DistrictIndex.from_geojson_path(HOUSE_GEOJSON_PATH)
 
@@ -210,6 +314,7 @@ def health():
             "allowed_origins": ALLOWED_ORIGINS or "*",
         },
         "csv": _csv_counts(),
+        "votes": {"source": _votes_csv_url(), "cache_age": (time.time() - _VOTES_CACHE["t"]) if _VOTES_CACHE["t"] else None},
         "commit": RENDER_COMMIT,
     })
 
@@ -297,6 +402,71 @@ def api_lookup_legislators():
         "district": base_label,
         "stateRepresentatives": reps
     })
+
+# ---------- restored votes endpoints ----------
+@app.get("/api/key-votes")
+def api_key_votes():
+    person_id = (request.args.get("person_id") or "").strip()
+    name = (request.args.get("name") or "").strip()
+    district = (request.args.get("district") or "").strip()
+    refresh = (request.args.get("refresh") or "").strip() in ("1", "true", "yes")
+
+    rows, err = _fetch_votes_rows(force_refresh=refresh)
+    if err:
+        return jsonify({"success": False, "error": {"message": err}}), 400
+
+    row = _match_row_for_rep(rows, person_id=person_id, name=name, district=district)
+    votes = _row_to_vote_list(row) if row else []
+
+    return jsonify({
+        "success": True,
+        "data": {
+            "matched": bool(row),
+            "rep": {
+                "person_id": person_id or (row.get("openstates_person_id") if row else None),
+                "name": name or (row.get("name") or row.get("Representative") if row else None),
+                "district": district or (row.get("district") or row.get("District") if row else None),
+            },
+            "votes": votes
+        }
+    })
+
+@app.get("/api/lookup-with-votes")
+def api_lookup_with_votes():
+    addr = (request.args.get("address") or "").strip()
+    refresh = (request.args.get("refreshVotes") or "").strip() in ("1","true","yes")
+    if not addr:
+        return jsonify({"success": False, "error": {"message": "Missing address"}}), 400
+
+    # reuse existing lookup
+    base_resp = api_lookup_legislators()
+    if isinstance(base_resp, tuple):
+        resp, status = base_resp
+        if status != 200:
+            return base_resp
+        data = resp.get_json()
+    else:
+        data = base_resp.get_json()
+    reps = data.get("stateRepresentatives") or []
+
+    rows, err = _fetch_votes_rows(force_refresh=refresh)
+    votes_src = _VOTES_CACHE.get("src", "")
+    if err:
+        return jsonify({**data, "votesError": err, "votesSource": votes_src})
+
+    # attach votes by id/name+district
+    out_reps = []
+    for r in reps:
+        pid = r.get("id") or ""
+        nm  = r.get("name") or ""
+        dist= r.get("district") or ""
+        row = _match_row_for_rep(rows, person_id=pid, name=nm, district=dist)
+        r2 = {**r, "votes": _row_to_vote_list(row) if row else []}
+        out_reps.append(r2)
+
+    data["stateRepresentatives"] = out_reps
+    data["votesSource"] = votes_src
+    return jsonify(data)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
