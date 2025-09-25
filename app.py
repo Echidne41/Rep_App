@@ -2,10 +2,10 @@ import os, time, json, csv, requests, signal
 from typing import Dict, Any, List, Tuple, Optional
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from functools import wraps  # <-- NEW
+from functools import wraps
 
 from utils.geocode import geocode_address, GeocodeError
-from utils.districts import DistrictIndex  # SU2 -> "Sullivan 2" normalization here
+from utils.districts import DistrictIndex  # SU2 -> "Sullivan 2" normalization
 
 # ---------------- Flask & CORS ----------------
 app = Flask(__name__)
@@ -15,6 +15,11 @@ if ALLOWED_ORIGINS in ("", "*"):
 else:
     origins = [o.strip() for o in ALLOWED_ORIGINS.split(",") if o.strip()]
     CORS(app, resources={r"/*": {"origins": origins}}, supports_credentials=False)
+
+# root route so Render health probe never hangs
+@app.route("/")
+def index():
+    return "OK", 200
 
 # ---------------- Env / Config ----------------
 OPENSTATES_API_KEY    = os.getenv("OPENSTATES_API_KEY", "")
@@ -29,7 +34,7 @@ VOTES_CSV_URL     = os.getenv("VOTES_CSV_URL")
 VOTES_TTL_SECONDS = int(os.getenv("VOTES_TTL_SECONDS", os.getenv("OS_TTL_SECONDS", "300")))
 
 OS_MIN_DELAY_MS = int(os.getenv("OS_MIN_DELAY_MS", "350"))
-OS_TTL_SECONDS  = int(os.getenv("OS_TTL_SECONDS", "180"))  # also used as people-cache TTL
+OS_TTL_SECONDS  = int(os.getenv("OS_TTL_SECONDS", "180"))  # also people-cache TTL
 
 RENDER_COMMIT      = os.getenv("RENDER_GIT_COMMIT", "")
 HOUSE_GEOJSON_PATH = os.getenv("HOUSE_GEOJSON_PATH", "data/nh_house_districts.json")
@@ -54,11 +59,12 @@ def _os_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
     _os_throttle()
     headers = {"X-API-Key": OPENSTATES_API_KEY, "Accept": "application/json"}
     try:
-        r = requests.get(f"{OS_BASE}{path}", params=params, headers=headers, timeout=8)  # 8s hard timeout
+        # 8s hard HTTP timeout so requests can't hang the worker
+        r = requests.get(f"{OS_BASE}{path}", params=params, headers=headers, timeout=8)
     except requests.RequestException as e:
         return {"error": "transport", "status": 502, "detail": str(e)[:200]}
     if r.status_code == 429:
-        time.sleep(min(1.0 + (time.time() % 0.5), 2.0))  # small jitter backoff
+        time.sleep(min(1.0 + (time.time() % 0.5), 2.0))  # tiny jittered backoff
         return {"error": "rate_limited", "status": 429, "detail": r.text[:200]}
     if r.status_code >= 400:
         return {"error": "upstream", "status": r.status_code, "detail": r.text[:200]}
@@ -68,6 +74,7 @@ def _os_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": "bad_json", "status": 502, "detail": str(e)[:200]}
 
 def os_people_by_district(label: str) -> Dict[str, Any]:
+    """TTL cache; never store errors."""
     now = time.time()
     key = str(label).strip()
     if OS_TTL_SECONDS > 0:
@@ -115,7 +122,8 @@ def _read_csv_from(url_or_path: Optional[str], fallback_path: str) -> Tuple[List
         real = path
     else:
         real = fallback_path
-    headers: List[str] = []; rows: List[List[str]] = []
+    headers: List[str] = []
+    rows: List[List[str]] = []
     try:
         with open(real, newline="", encoding="utf-8-sig") as f:
             reader = csv.reader(f)
@@ -175,23 +183,18 @@ def _csv_counts() -> Dict[str, Any]:
 # ---------------- District polygons ----------------
 DISTRICTS = DistrictIndex.from_geojson_path(HOUSE_GEOJSON_PATH)
 
-# ---------------- Route-timeout helper (fixed: preserves function name) ----------------
+# ---------------- Inline hard-timeout helper ----------------
 class TimeoutException(Exception): ...
-def _with_alarm(seconds: int):
-    """Unix-only hard timeout using SIGALRM (works on Render/gunicorn)."""
-    def decorator(fn):
-        @wraps(fn)  # <-- critical: keep the original endpoint name
-        def wrapped(*args, **kwargs):
-            def handler(signum, frame): raise TimeoutException()
-            old = signal.signal(signal.SIGALRM, handler)
-            signal.alarm(seconds)
-            try:
-                return fn(*args, **kwargs)
-            finally:
-                signal.alarm(0)
-                signal.signal(signal.SIGALRM, old)
-        return wrapped
-    return decorator
+def run_with_alarm(seconds: int, fn):
+    """Run fn() with SIGALRM cutoff; return result or raise TimeoutException."""
+    def handler(signum, frame): raise TimeoutException()
+    old = signal.signal(signal.SIGALRM, handler)
+    signal.alarm(seconds)
+    try:
+        return fn()
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
 
 # ---------------- Routes ----------------
 @app.route("/health")
@@ -229,13 +232,12 @@ def debug_trace():
     })
 
 @app.route("/debug/district")
-@_with_alarm(12)
 def debug_district():
-    label = request.args.get("label", "").strip()
+    label = (request.args.get("label") or "").strip()
     if not label:
         return jsonify({"ok": False, "error": "Missing label"}), 400
     try:
-        payload = os_people_by_district(label)
+        payload = run_with_alarm(12, lambda: os_people_by_district(label))
     except TimeoutException:
         return jsonify({"ok": False, "error": "OpenStates timeout"}), 504
     if "error" in payload:
@@ -243,7 +245,6 @@ def debug_district():
     return jsonify({"ok": True, "district": label, "people": _extract_people(payload)})
 
 @app.route("/api/lookup-legislators")
-@_with_alarm(12)
 def api_lookup_legislators():
     addr = request.args.get("address")
     lat  = request.args.get("lat")
@@ -266,18 +267,21 @@ def api_lookup_legislators():
     else:
         return jsonify({"success": False, "error": "provide address or lat/lon"}), 400
 
+    # base district via polygons
+    match = DISTRICTS.find(latf, lonf)
+    if not match:
+        return jsonify({
+            "success": True,
+            "formattedAddress": geocode_raw.get("display_name") if geocode_raw else None,
+            "lat": latf, "lon": lonf,
+            "stateRepresentatives": [],
+            "note": "No base district found in GeoJSON."
+        })
+    base_label, _props = match
+
+    # OpenStates with hard 12s cutoff
     try:
-        match = DISTRICTS.find(latf, lonf)
-        if not match:
-            return jsonify({
-                "success": True,
-                "formattedAddress": geocode_raw.get("display_name") if geocode_raw else None,
-                "lat": latf, "lon": lonf,
-                "stateRepresentatives": [],
-                "note": "No base district found in GeoJSON."
-            })
-        base_label, _props = match
-        payload = os_people_by_district(base_label)
+        payload = run_with_alarm(12, lambda: os_people_by_district(base_label))
     except TimeoutException:
         return jsonify({"success": False, "error": "OpenStates timeout", "stateRepresentatives": []}), 504
 
