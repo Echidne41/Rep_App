@@ -1,23 +1,22 @@
 import os, time, json, csv, requests
-from functools import lru_cache
 from typing import Dict, Any, List, Tuple, Optional
 from flask import Flask, jsonify, request
-from flask_cors import CORS  # CORS
+from flask_cors import CORS
 
 from utils.geocode import geocode_address, GeocodeError
-from utils.districts import DistrictIndex
+from utils.districts import DistrictIndex  # does SU2 -> Sullivan 2 normalization
 
 app = Flask(__name__)
 
-# --- CORS: allow all (you can lock down later via ALLOWED_ORIGINS) ---
+# ---- CORS ----
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").strip()
-if ALLOWED_ORIGINS == "*" or ALLOWED_ORIGINS == "":
+if ALLOWED_ORIGINS in ("", "*"):
     CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
 else:
     origins = [o.strip() for o in ALLOWED_ORIGINS.split(",") if o.strip()]
     CORS(app, resources={r"/*": {"origins": origins}}, supports_credentials=False)
 
-# ---------- Config ----------
+# ---- Config ----
 OPENSTATES_API_KEY = os.getenv("OPENSTATES_API_KEY", "")
 NOMINATIM_EMAIL    = os.getenv("NOMINATIM_EMAIL", "rep-app@yourorg.org")
 
@@ -26,19 +25,22 @@ FLOTERIAL_TOWN_CSV_URL = os.getenv("FLOTERIAL_TOWN_CSV_URL")
 FLOTERIAL_BY_BASE_PATH = os.getenv("FLOTERIAL_BY_BASE_PATH", "floterial_by_base.csv")
 FLOTERIAL_MAP_PATH     = os.getenv("FLOTERIAL_MAP_PATH", "floterial_by_town.csv")
 
-VOTES_CSV_URL   = os.getenv("VOTES_CSV_URL")
+VOTES_CSV_URL     = os.getenv("VOTES_CSV_URL")
 VOTES_TTL_SECONDS = int(os.getenv("VOTES_TTL_SECONDS", os.getenv("OS_TTL_SECONDS", "300")))
 
 OS_MIN_DELAY_MS = int(os.getenv("OS_MIN_DELAY_MS", "350"))
 OS_TTL_SECONDS  = int(os.getenv("OS_TTL_SECONDS", "180"))
 
-RENDER_COMMIT   = os.getenv("RENDER_GIT_COMMIT", "")
-HOUSE_GEOJSON_PATH = os.getenv("HOUSE_GEOJSON_PATH", "data/nh_house_districts.json")
+RENDER_COMMIT       = os.getenv("RENDER_GIT_COMMIT", "")
+HOUSE_GEOJSON_PATH  = os.getenv("HOUSE_GEOJSON_PATH", "data/nh_house_districts.json")
 
-# ---------- OpenStates ----------
+# ---- OpenStates client (with throttle + TTL cache, never cache errors) ----
 OS_BASE = "https://v3.openstates.org"
 _last_call_ts = 0.0
+_os_people_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+
 def _os_throttle():
+    """Ensure minimum spacing between OpenStates calls."""
     global _last_call_ts
     now = time.time()
     need = OS_MIN_DELAY_MS / 1000.0
@@ -54,24 +56,53 @@ def _os_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
     headers = {"X-API-Key": OPENSTATES_API_KEY, "Accept": "application/json"}
     r = requests.get(f"{OS_BASE}{path}", params=params, headers=headers, timeout=20)
     if r.status_code == 429:
+        # small backoff+jitter to reduce stampede
+        time.sleep(min(1.0 + (time.time() % 0.5), 2.0))
         return {"error": "rate_limited", "status": 429, "detail": r.text[:200]}
     r.raise_for_status()
     return r.json()
 
-@lru_cache(maxsize=2048)
 def os_people_by_district(label: str) -> Dict[str, Any]:
-    return _os_get("/people", {
-        "jurisdiction": "New Hampshire",
-        "chamber": "lower",
-        "district": label,
-        "per_page": 50,
-    })
+    """TTL-aware cache. Never cache error payloads."""
+    now = time.time()
+    key = str(label).strip()
+
+    if OS_TTL_SECONDS > 0:
+        cached = _os_people_cache.get(key)
+        if cached:
+            ts, payload = cached
+            if now - ts < OS_TTL_SECONDS:
+                return payload
+            else:
+                _os_people_cache.pop(key, None)
+
+    try:
+        payload = _os_get(
+            "/people",
+            {
+                "jurisdiction": "New Hampshire",
+                "chamber": "lower",
+                "district": key,
+                "per_page": 50,
+            },
+        )
+    except Exception as e:
+        return {"error": "transport", "detail": str(e)}
+
+    # never cache an error
+    if payload.get("error"):
+        _os_people_cache.pop(key, None)
+        return payload
+
+    if OS_TTL_SECONDS > 0:
+        _os_people_cache[key] = (time.time(), payload)
+    return payload
 
 def _extract_people(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     if "error" in payload:
         return []
     data = payload.get("results") or payload.get("data") or payload.get("people") or []
-    out = []
+    out: List[Dict[str, Any]] = []
     for p in data:
         out.append({
             "id": p.get("id") or p.get("openstates_id"),
@@ -82,7 +113,7 @@ def _extract_people(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         })
     return out
 
-# ---------- CSV helpers ----------
+# ---- CSV helpers (unchanged) ----
 def _read_csv_from(url_or_path: Optional[str], fallback_path: str) -> Tuple[List[str], List[List[str]]]:
     path = (url_or_path or "").strip()
     if path.startswith("file:///"):
@@ -91,7 +122,8 @@ def _read_csv_from(url_or_path: Optional[str], fallback_path: str) -> Tuple[List
         real = path
     else:
         real = fallback_path
-    headers: List[str] = []; rows: List[List[str]] = []
+    headers: List[str] = []
+    rows: List[List[str]] = []
     try:
         with open(real, newline="", encoding="utf-8-sig") as f:
             reader = csv.reader(f)
@@ -113,6 +145,7 @@ def _read_csv_from(url_or_path: Optional[str], fallback_path: str) -> Tuple[List
     return headers, rows
 
 def _norm(h: str) -> str: return h.strip().lower().replace(" ", "_")
+
 def _pick_cols(headers: List[str]) -> Tuple[Optional[int], Optional[int]]:
     key_idx = val_idx = None
     for i, h in enumerate(headers):
@@ -147,7 +180,7 @@ def _csv_counts() -> Dict[str, Any]:
         "sample_by_town": dict(list(_group_sample(by_town_h, by_town_r).items())[:3]),
     }
 
-# ---------- Districts (GeoJSON) ----------
+# ---- District polygons (GeoJSON) ----
 DISTRICTS = DistrictIndex.from_geojson_path(HOUSE_GEOJSON_PATH)
 
 # ================== ROUTES ==================
@@ -166,20 +199,6 @@ def health():
         "csv": _csv_counts(),
         "commit": RENDER_COMMIT,
     })
-
-@app.route("/version")
-def version():
-    return jsonify({"commit": RENDER_COMMIT})
-
-@app.route("/debug/floterials")
-def debug_floterials():
-    return jsonify(_csv_counts())
-
-@app.route("/debug/floterial-headers")
-def debug_flot_headers():
-    by_base_h, _ = _read_csv_from(FLOTERIAL_BASE_CSV_URL, FLOTERIAL_BY_BASE_PATH)
-    by_town_h, _ = _read_csv_from(FLOTERIAL_TOWN_CSV_URL, FLOTERIAL_MAP_PATH)
-    return jsonify({"by_base": by_base_h, "by_town": by_town_h})
 
 @app.route("/debug/trace")
 def debug_trace():
@@ -213,8 +232,8 @@ def debug_district():
 @app.route("/api/lookup-legislators")
 def api_lookup_legislators():
     addr = request.args.get("address")
-    lat = request.args.get("lat")
-    lon = request.args.get("lon")
+    lat  = request.args.get("lat")
+    lon  = request.args.get("lon")
 
     if addr:
         try:
