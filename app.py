@@ -143,13 +143,23 @@ def _read_csv_from(url_or_path: Optional[str], fallback_path: str) -> Tuple[List
 
 def _h_norm(h: str) -> str: return h.strip().lower().replace(" ", "_")
 
-def _pick_cols(headers: List[str]) -> Tuple[Optional[int], Optional[int]]:
-    key_idx = val_idx = None
-    for i, h in enumerate(headers):
-        hn = _h_norm(h)
-        if hn in ("base","base_district","base_label"): key_idx = i
-        if hn in ("floterial","overlay","floterial_label","floterial_district"): val_idx = i
-    return key_idx, val_idx
+def _pick_col(row: dict, candidates: List[str]) -> Optional[str]:
+    # normalize headers
+    norm_map = { _nrm(k): k for k in row.keys() if k is not None }
+    wants = [ _nrm(w) for w in candidates ]  # <-- normalize wants too
+
+    # exact match first
+    for want in wants:
+        if want in norm_map:
+            return norm_map[want]
+
+    # loose contains match (only as a last resort)
+    for nk, original in norm_map.items():
+        for want in wants:
+            if want and want in nk:
+                return original
+    return None
+
 
 def _group_sample(headers: List[str], rows: List[List[str]]) -> Dict[str, List[str]]:
     out: Dict[str, List[str]] = {}
@@ -314,9 +324,9 @@ def _row_to_vote_list_wide(row: dict) -> List[dict]:
     return votes
 
 def _collect_votes_for_rep(rows, *, person_id: str = "", name: str = "", district: str = "") -> Tuple[List[dict], Optional[dict]]:
-    """Supports wide (multi-bill columns) and long (bill,vote) CSV."""
-    def has_long_keys(r): 
-        return bool(_pick_col(r, ["bill"])) and bool(_pick_col(r, ["vote"]))
+    def has_long_keys(r: dict) -> bool:
+        keys = { _nrm(k) for k in r.keys() if k is not None }
+        return ("bill" in keys) and ("vote" in keys)  # exact, not substring
     is_long = any(has_long_keys(r) for r in rows) if rows else False
 
     if not is_long:
@@ -527,4 +537,5 @@ def api_lookup_with_votes():
 # ===================== main =====================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+
 
