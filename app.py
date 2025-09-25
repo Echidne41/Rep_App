@@ -180,6 +180,22 @@ def _csv_counts() -> Dict[str, Any]:
 # ===================== Votes (CSV URL or local file) =====================
 _VOTES_CACHE = {"t": 0, "rows": [], "src": ""}
 
+def _pick_col(row: dict, candidates: List[str]) -> Optional[str]:
+    # normalize both headers and candidate names
+    norm_map = {_nrm(k): k for k in row.keys() if k is not None}
+    wants = [_nrm(w) for w in candidates]
+
+    for want in wants:
+        if want in norm_map:
+            return norm_map[want]
+
+    # loose contains match (handles minor header variants)
+    for nk, original in norm_map.items():
+        for want in wants:
+            if want in nk:
+                return original
+    return None
+
 def _votes_csv_url() -> str:
     if VOTES_CSV_URL:
         return VOTES_CSV_URL
@@ -511,3 +527,4 @@ def api_lookup_with_votes():
 # ===================== main =====================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+
