@@ -1,14 +1,13 @@
-import os, time, json, csv, requests
+import os, time, json, csv, requests, signal
 from typing import Dict, Any, List, Tuple, Optional
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 from utils.geocode import geocode_address, GeocodeError
-from utils.districts import DistrictIndex  # does SU2 -> Sullivan 2 normalization
+from utils.districts import DistrictIndex  # SU2 -> "Sullivan 2" normalization here
 
+# ---------------- Flask & CORS ----------------
 app = Flask(__name__)
-
-# ---- CORS ----
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").strip()
 if ALLOWED_ORIGINS in ("", "*"):
     CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
@@ -16,9 +15,9 @@ else:
     origins = [o.strip() for o in ALLOWED_ORIGINS.split(",") if o.strip()]
     CORS(app, resources={r"/*": {"origins": origins}}, supports_credentials=False)
 
-# ---- Config ----
-OPENSTATES_API_KEY = os.getenv("OPENSTATES_API_KEY", "")
-NOMINATIM_EMAIL    = os.getenv("NOMINATIM_EMAIL", "rep-app@yourorg.org")
+# ---------------- Env / Config ----------------
+OPENSTATES_API_KEY    = os.getenv("OPENSTATES_API_KEY", "")
+NOMINATIM_EMAIL       = os.getenv("NOMINATIM_EMAIL", "rep-app@yourorg.org")
 
 FLOTERIAL_BASE_CSV_URL = os.getenv("FLOTERIAL_BASE_CSV_URL")
 FLOTERIAL_TOWN_CSV_URL = os.getenv("FLOTERIAL_TOWN_CSV_URL")
@@ -29,12 +28,12 @@ VOTES_CSV_URL     = os.getenv("VOTES_CSV_URL")
 VOTES_TTL_SECONDS = int(os.getenv("VOTES_TTL_SECONDS", os.getenv("OS_TTL_SECONDS", "300")))
 
 OS_MIN_DELAY_MS = int(os.getenv("OS_MIN_DELAY_MS", "350"))
-OS_TTL_SECONDS  = int(os.getenv("OS_TTL_SECONDS", "180"))
+OS_TTL_SECONDS  = int(os.getenv("OS_TTL_SECONDS", "180"))  # also used as people-cache TTL
 
-RENDER_COMMIT       = os.getenv("RENDER_GIT_COMMIT", "")
-HOUSE_GEOJSON_PATH  = os.getenv("HOUSE_GEOJSON_PATH", "data/nh_house_districts.json")
+RENDER_COMMIT      = os.getenv("RENDER_GIT_COMMIT", "")
+HOUSE_GEOJSON_PATH = os.getenv("HOUSE_GEOJSON_PATH", "data/nh_house_districts.json")
 
-# ---- OpenStates client (with throttle + TTL cache, never cache errors) ----
+# ---------------- OpenStates client ----------------
 OS_BASE = "https://v3.openstates.org"
 _last_call_ts = 0.0
 _os_people_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
@@ -51,49 +50,47 @@ def _os_throttle():
 
 def _os_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
     if not OPENSTATES_API_KEY:
-        raise RuntimeError("OPENSTATES_API_KEY not set")
+        return {"error": "no_api_key", "status": 500, "detail": "OPENSTATES_API_KEY not set"}
     _os_throttle()
     headers = {"X-API-Key": OPENSTATES_API_KEY, "Accept": "application/json"}
-    r = requests.get(f"{OS_BASE}{path}", params=params, headers=headers, timeout=20)
+    # Hard HTTP timeout so requests can't hang the worker
+    try:
+        r = requests.get(f"{OS_BASE}{path}", params=params, headers=headers, timeout=8)
+    except requests.RequestException as e:
+        return {"error": "transport", "status": 502, "detail": str(e)[:200]}
     if r.status_code == 429:
         # small backoff+jitter to reduce stampede
         time.sleep(min(1.0 + (time.time() % 0.5), 2.0))
         return {"error": "rate_limited", "status": 429, "detail": r.text[:200]}
-    r.raise_for_status()
-    return r.json()
+    if r.status_code >= 400:
+        return {"error": "upstream", "status": r.status_code, "detail": r.text[:200]}
+    try:
+        return r.json()
+    except ValueError as e:
+        return {"error": "bad_json", "status": 502, "detail": str(e)[:200]}
 
 def os_people_by_district(label: str) -> Dict[str, Any]:
     """TTL-aware cache. Never cache error payloads."""
     now = time.time()
     key = str(label).strip()
-
     if OS_TTL_SECONDS > 0:
         cached = _os_people_cache.get(key)
         if cached:
             ts, payload = cached
             if now - ts < OS_TTL_SECONDS:
                 return payload
-            else:
-                _os_people_cache.pop(key, None)
+            _os_people_cache.pop(key, None)
 
-    try:
-        payload = _os_get(
-            "/people",
-            {
-                "jurisdiction": "New Hampshire",
-                "chamber": "lower",
-                "district": key,
-                "per_page": 50,
-            },
-        )
-    except Exception as e:
-        return {"error": "transport", "detail": str(e)}
+    payload = _os_get("/people", {
+        "jurisdiction": "New Hampshire",
+        "chamber": "lower",
+        "district": key,
+        "per_page": 50,
+    })
 
-    # never cache an error
     if payload.get("error"):
         _os_people_cache.pop(key, None)
         return payload
-
     if OS_TTL_SECONDS > 0:
         _os_people_cache[key] = (time.time(), payload)
     return payload
@@ -113,7 +110,7 @@ def _extract_people(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         })
     return out
 
-# ---- CSV helpers (unchanged) ----
+# ---------------- CSV helpers ----------------
 def _read_csv_from(url_or_path: Optional[str], fallback_path: str) -> Tuple[List[str], List[List[str]]]:
     path = (url_or_path or "").strip()
     if path.startswith("file:///"):
@@ -150,8 +147,8 @@ def _pick_cols(headers: List[str]) -> Tuple[Optional[int], Optional[int]]:
     key_idx = val_idx = None
     for i, h in enumerate(headers):
         hn = _norm(h)
-        if hn in ("base","base_district","base_label"): key_idx = i
-        if hn in ("floterial","overlay","floterial_label","floterial_district"): val_idx = i
+        if hn in ("base", "base_district", "base_label"): key_idx = i
+        if hn in ("floterial", "overlay", "floterial_label", "floterial_district"): val_idx = i
     return key_idx, val_idx
 
 def _group_sample(headers: List[str], rows: List[List[str]]) -> Dict[str, List[str]]:
@@ -180,10 +177,27 @@ def _csv_counts() -> Dict[str, Any]:
         "sample_by_town": dict(list(_group_sample(by_town_h, by_town_r).items())[:3]),
     }
 
-# ---- District polygons (GeoJSON) ----
+# ---------------- District polygons ----------------
 DISTRICTS = DistrictIndex.from_geojson_path(HOUSE_GEOJSON_PATH)
 
-# ================== ROUTES ==================
+# ---------------- Route-timeout helper ----------------
+class TimeoutException(Exception): ...
+def _with_alarm(seconds: int):
+    """Unix-only hard timeout using SIGALRM (works on Render/gunicorn)."""
+    def decorator(fn):
+        def wrapper(*args, **kwargs):
+            def handler(signum, frame): raise TimeoutException()
+            old = signal.signal(signal.SIGALRM, handler)
+            signal.alarm(seconds)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old)
+        return wrapper
+    return decorator
+
+# ---------------- Routes ----------------
 @app.route("/health")
 def health():
     return jsonify({
@@ -212,28 +226,36 @@ def debug_trace():
     match = DISTRICTS.find(lat, lon)
     base_label = match[0] if match else None
     return jsonify({
-        "ok": True,
-        "inputAddress": addr,
+        "ok": True, "inputAddress": addr,
         "lat": lat, "lon": lon,
         "geocode": raw,
         "base_district_label": base_label,
     })
 
 @app.route("/debug/district")
+@_with_alarm(12)  # hard 12s cutoff so worker never hangs
 def debug_district():
     label = request.args.get("label", "").strip()
     if not label:
         return jsonify({"ok": False, "error": "Missing label"}), 400
-    payload = os_people_by_district(label)
+    try:
+        payload = os_people_by_district(label)
+    except TimeoutException:
+        return jsonify({"ok": False, "error": "OpenStates timeout"}), 504
     if "error" in payload:
         return jsonify({"ok": False, **payload}), 429 if payload.get("status") == 429 else 502
     return jsonify({"ok": True, "district": label, "people": _extract_people(payload)})
 
 @app.route("/api/lookup-legislators")
+@_with_alarm(12)  # hard 12s cutoff
 def api_lookup_legislators():
     addr = request.args.get("address")
     lat  = request.args.get("lat")
     lon  = request.args.get("lon")
+
+    latf: Optional[float] = None
+    lonf: Optional[float] = None
+    geocode_raw: Optional[Dict[str, Any]] = None
 
     if addr:
         try:
@@ -242,24 +264,27 @@ def api_lookup_legislators():
             return jsonify({"success": False, "error": f"geocode_failed: {e}", "stateRepresentatives": []}), 502
     elif lat and lon:
         try:
-            latf = float(lat); lonf = float(lon); geocode_raw = None
+            latf = float(lat); lonf = float(lon)
         except Exception:
             return jsonify({"success": False, "error": "invalid lat/lon"}), 400
     else:
         return jsonify({"success": False, "error": "provide address or lat/lon"}), 400
 
-    match = DISTRICTS.find(latf, lonf)
-    if not match:
-        return jsonify({
-            "success": True,
-            "formattedAddress": geocode_raw.get("display_name") if geocode_raw else None,
-            "lat": latf, "lon": lonf,
-            "stateRepresentatives": [],
-            "note": "No base district found in GeoJSON."
-        })
+    try:
+        match = DISTRICTS.find(latf, lonf)
+        if not match:
+            return jsonify({
+                "success": True,
+                "formattedAddress": geocode_raw.get("display_name") if geocode_raw else None,
+                "lat": latf, "lon": lonf,
+                "stateRepresentatives": [],
+                "note": "No base district found in GeoJSON."
+            })
+        base_label, _props = match
+        payload = os_people_by_district(base_label)
+    except TimeoutException:
+        return jsonify({"success": False, "error": "OpenStates timeout", "stateRepresentatives": []}), 504
 
-    base_label, _props = match
-    payload = os_people_by_district(base_label)
     if "error" in payload:
         status = 429 if payload.get("status") == 429 else 502
         return jsonify({"success": False, "error": payload, "stateRepresentatives": []}), status
@@ -273,5 +298,6 @@ def api_lookup_legislators():
         "stateRepresentatives": reps
     })
 
+# ---------------- Main ----------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
