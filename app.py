@@ -323,11 +323,13 @@ def _row_to_vote_list_wide(row: dict) -> List[dict]:
         votes.append({"bill": _bill_key(k), "vote": _canon_vote_value(str(v))})
     return votes
 
-def _collect_votes_for_rep(rows, *, person_id: str = "", name: str = "", district: str = "") -> Tuple[List[dict], Optional[dict]]:
+def _collect_votes_for_rep(rows, *, person_id: str = "", name: str = "", district: str = ""):
     def has_long_keys(r: dict) -> bool:
-        keys = { _nrm(k) for k in r.keys() if k is not None }
+        keys = {_nrm(k) for k in r.keys() if k is not None}
         return ("bill" in keys) and ("vote" in keys)  # exact, not substring
     is_long = any(has_long_keys(r) for r in rows) if rows else False
+    ...
+
 
     if not is_long:
         row = _match_row_for_rep(rows, person_id=person_id, name=name, district=district)
@@ -537,5 +539,6 @@ def api_lookup_with_votes():
 # ===================== main =====================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+
 
 
