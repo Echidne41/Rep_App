@@ -1,0 +1,15 @@
+name: CI
+on:
+  pull_request:
+    branches: [ "main" ]
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements.txt || pip install flask flask-cors pytest
+      - run: python tools/validate_csv.py
+      - run: pytest -q
